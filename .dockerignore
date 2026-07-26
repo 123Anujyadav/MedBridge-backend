@@ -1,0 +1,35 @@
+# Secrets — must never be baked into an image layer.
+# The build context is Backend/, so without these rules `COPY . .` would embed
+# real credentials and patient uploads into the published image.
+.env
+.env.*
+!.env.example
+
+# Patient uploads (PHI)
+uploads/
+uploads_test/
+
+# Local virtualenvs — huge, platform-specific, and would shadow site-packages
+venv/
+.venv/
+
+# Python caches and build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases
+*.db
+*.sqlite3
+
+# VCS / tooling
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Tests are not needed in the runtime image
+tests/

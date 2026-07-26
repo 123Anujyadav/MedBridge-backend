@@ -1,0 +1,19 @@
+# Import all models so they are registered on Base metadata
+# for Alembic auto-migration discovery.
+from app.db.base_class import Base  # noqa
+from app.models.user import User  # noqa
+from app.models.patient import Patient  # noqa
+from app.models.doctor import Doctor  # noqa
+from app.models.hospital import Hospital  # noqa
+from app.models.case import Case, Symptom  # noqa
+from app.models.prescription import Prescription, Medication  # noqa
+from app.models.appointment import Appointment  # noqa
+from app.models.report import Report  # noqa
+from app.models.report_version import ReportVersion  # noqa
+from app.models.notification import NotificationItem  # noqa
+from app.models.emergency import EmergencyRequest  # noqa
+from app.models.audit import AuditLog  # noqa
+from app.models.consent import ConsentRecord  # noqa
+from app.models.vital_reading import VitalReading  # noqa
+from app.models.intake import IntakeExtractedEntity, IntakeSessionRecord  # noqa
+from app.models.assistant import AssistantConversation, AssistantMessage  # noqa

@@ -1,0 +1,25 @@
+# Environment / secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+test.db
+
+# Local SQLite databases
+*.db-journal
+app.db
+
+# Uploaded patient files (PHI — must never be committed)
+uploads/
+uploads_test/

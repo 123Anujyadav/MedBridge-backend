@@ -1,0 +1,482 @@
+"""
+Assistant pipeline nodes.
+
+One method per stage of the brief's pipeline:
+
+    language -> memory -> intent -> entities -> retrieval -> LLM -> structured JSON
+
+Every node degrades safely. A model outage yields a reduced but honest answer
+rather than an exception, and emergency detection never depends on the model.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from app.ai_core.utils.validators import sanitize_prompt_input
+from app.assistant.application.ports import RetrievedSnippet
+from app.assistant.domain.entities import (
+    AssistantAnswer,
+    CauseItem,
+    EmergencyNotice,
+    LifestyleAdviceItem,
+    MedicalEntity,
+    MedicineGuidance,
+    SpecialistSuggestion,
+    UrgencyAssessment,
+)
+from app.assistant.domain.enums import (
+    ConfidenceLabel,
+    IntentType,
+    KnowledgeSource,
+    MedicineType,
+    SpecialistPriority,
+    UrgencyLevel,
+)
+from app.assistant.domain.language import detect_language, language_instruction
+from app.assistant.pipeline import prompts
+from app.assistant.pipeline.state import AssistantState
+from app.intake.domain.policies import detect_red_flags, is_evidence_grounded
+from app.intake.domain.specialties import canonicalise_specialty
+
+logger = logging.getLogger(__name__)
+
+_MAX_ENTITIES = 25
+_MAX_CAUSES = 3
+_MAX_FOLLOW_UPS = 3
+
+_EMERGENCY_GUIDANCE = {
+    "english": (
+        "What you are describing may be a medical emergency. Please call your "
+        "local emergency number or go to the nearest emergency department now. "
+        "Do not wait for an online reply."
+    ),
+    "hindi": (
+        "आप जो बता रहे हैं वह एक मेडिकल इमरजेंसी हो सकती है। कृपया तुरंत अपने "
+        "नज़दीकी अस्पताल जाएँ या आपातकालीन नंबर पर कॉल करें। ऑनलाइन उत्तर का "
+        "इंतज़ार न करें।"
+    ),
+    "hinglish": (
+        "Aap jo bata rahe hain wo ek medical emergency ho sakti hai. Kripya "
+        "turant nazdeeki hospital jaayein ya emergency number par call karein. "
+        "Online reply ka intezaar na karein."
+    ),
+}
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_str_list(value: Any, limit: int = 10) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if str(v).strip()][:limit]
+
+
+class AssistantNodes:
+    """
+    Dependency-injected node collection.
+
+    Holds only the LLM (process-wide). Knowledge retrieval is request-scoped and
+    arrives through `AssistantState`, keeping the compiled graph reusable.
+    """
+
+    def __init__(self, *, llm) -> None:
+        self._llm = llm
+
+    # -- stage 1: language + deterministic safety scan ---------------------
+
+    async def detect_language_node(self, state: AssistantState) -> AssistantState:
+        """
+        Identify language and run red-flag detection.
+
+        Red flags are computed here, before any model call, so an unavailable
+        LLM cannot suppress an emergency escalation.
+        """
+        conversation = state["conversation"]
+        raw = state.get("user_text", "")
+        state["user_text"] = sanitize_prompt_input(raw, max_length=4000)
+        state.setdefault("degraded", False)
+        state.setdefault("rejected_entities", 0)
+
+        conversation.language = detect_language(state["user_text"])
+
+        flags = detect_red_flags(conversation.transcript_for_grounding())
+        state["red_flags"] = flags
+        if flags:
+            logger.warning(
+                "[ASSISTANT_RED_FLAG] conversation=%s flags=%s",
+                conversation.conversation_id,
+                flags,
+            )
+        return state
+
+    # -- stage 2: intent ---------------------------------------------------
+
+    async def detect_intent_node(self, state: AssistantState) -> AssistantState:
+        """Classify the message. Red flags settle it without a model call."""
+        conversation = state["conversation"]
+        if state.get("red_flags"):
+            state["intent"] = IntentType.EMERGENCY
+            return state
+
+        payload = await self._llm.complete_json(
+            system_prompt=prompts.INTENT_SYSTEM_PROMPT,
+            user_content=f"PATIENT MESSAGE:\n{state['user_text']}",
+            max_tokens=120,
+            temperature=0.0,
+        )
+        raw = str(payload.get("intent", "")).strip().casefold()
+        try:
+            state["intent"] = IntentType(raw)
+        except ValueError:
+            state["degraded"] = True
+            state["intent"] = (
+                IntentType.FOLLOW_UP
+                if conversation.asked_questions
+                else IntentType.SYMPTOM_REPORT
+            )
+        return state
+
+    # -- stage 3: medical entity extraction --------------------------------
+
+    async def extract_entities_node(self, state: AssistantState) -> AssistantState:
+        """
+        Extract clinical entities, then verify each against the patient's words.
+
+        Reuses the intake agent's grounding check so a fabricated allergy is
+        rejected here exactly as it is during structured intake.
+        """
+        conversation = state["conversation"]
+        transcript = conversation.transcript_for_grounding()
+        state.setdefault("entities", [])
+
+        payload = await self._llm.complete_json(
+            system_prompt=prompts.ENTITY_SYSTEM_PROMPT,
+            user_content=f"PATIENT'S OWN WORDS (verbatim):\n{transcript}",
+            max_tokens=1200,
+            temperature=0.0,
+        )
+        raw_entities = payload.get("entities")
+        if not isinstance(raw_entities, list):
+            state["degraded"] = True
+            return state
+
+        kept: list[MedicalEntity] = []
+        rejected = 0
+        for item in raw_entities[:_MAX_ENTITIES]:
+            if not isinstance(item, dict):
+                continue
+            entity = MedicalEntity.from_dict(item)
+            if not entity.value:
+                continue
+            grounded, _ = is_evidence_grounded(entity.evidence, transcript)
+            if grounded:
+                kept.append(entity)
+            else:
+                rejected += 1
+
+        state["entities"] = kept
+        state["rejected_entities"] = rejected
+        if rejected:
+            logger.warning(
+                "[ASSISTANT_UNGROUNDED_DROPPED] conversation=%s count=%d",
+                conversation.conversation_id,
+                rejected,
+            )
+        return state
+
+    # -- stage 4: knowledge retrieval --------------------------------------
+
+    async def retrieve_knowledge_node(self, state: AssistantState) -> AssistantState:
+        """Fetch grounding context. Absence is normal, not an error."""
+        state.setdefault("snippets", [])
+        retriever = state.get("retriever")
+        if retriever is None or not retriever.is_available:
+            return state
+
+        try:
+            snippets = await retriever.retrieve(state["user_text"], limit=4)
+        except Exception:
+            logger.exception("[ASSISTANT_RETRIEVAL_FAILED] continuing without context")
+            return state
+
+        state["snippets"] = snippets
+        logger.info("[ASSISTANT_RETRIEVED] snippets=%d", len(snippets))
+        return state
+
+    # -- stage 5: answer generation ----------------------------------------
+
+    async def generate_answer_node(self, state: AssistantState) -> AssistantState:
+        """Produce the structured answer the existing cards render."""
+        conversation = state["conversation"]
+        snippets: list[RetrievedSnippet] = state.get("snippets") or []
+
+        context = "\n\n".join(
+            f"[{i + 1}] {s.text[:1200]}" for i, s in enumerate(snippets)
+        )
+
+        system_prompt = (
+            f"{prompts.ANSWER_SYSTEM_PROMPT}\n\n"
+            f"{language_instruction(conversation.language)}"
+        )
+        user_content = prompts.build_answer_user_content(
+            transcript=self._recent_transcript(conversation),
+            known_symptoms=conversation.known_symptoms,
+            asked_questions=conversation.asked_questions,
+            retrieved_context=context,
+            latest_message=state["user_text"],
+        )
+
+        payload = await self._llm.complete_json(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            max_tokens=2200,
+            temperature=0.3,
+        )
+
+        if not payload:
+            state["degraded"] = True
+            state["answer"] = self._fallback_answer(state)
+            return state
+
+        state["answer"] = self._build_answer(state, payload, snippets)
+        return state
+
+    # -- emergency short-circuit -------------------------------------------
+
+    async def emergency_node(self, state: AssistantState) -> AssistantState:
+        """
+        Return emergency guidance immediately.
+
+        No retrieval, no follow-up questions: a patient describing crushing
+        chest pain is told to seek care, not asked to rate their symptoms.
+        """
+        conversation = state["conversation"]
+        flags = state.get("red_flags") or []
+        language = conversation.language.value
+        guidance = _EMERGENCY_GUIDANCE.get(
+            language, _EMERGENCY_GUIDANCE["english"]
+        )
+
+        answer = AssistantAnswer(
+            reply_text=guidance,
+            summary=guidance,
+            symptoms=[e.value for e in state.get("entities", [])] or list(
+                conversation.known_symptoms
+            ),
+            urgency=UrgencyAssessment(
+                level=UrgencyLevel.EMERGENCY,
+                explanation="Automated screening matched: " + "; ".join(flags),
+            ),
+            emergency=EmergencyNotice(
+                heading="Seek emergency care now",
+                description=guidance,
+            ),
+            specialist=SpecialistSuggestion(
+                name="Emergency Medicine",
+                reason="Red-flag symptoms require immediate in-person assessment.",
+                priority=SpecialistPriority.URGENT,
+            ),
+            conversation_title="Emergency guidance",
+            language=conversation.language,
+            intent=IntentType.EMERGENCY,
+            confidence=1.0,
+            knowledge_source=KnowledgeSource.NONE,
+            red_flags=list(flags),
+            entities=list(state.get("entities", [])),
+        )
+        state["answer"] = answer
+
+        logger.warning(
+            "[ASSISTANT_EMERGENCY] conversation=%s flags=%s",
+            conversation.conversation_id,
+            flags,
+        )
+        return state
+
+    # -- helpers -----------------------------------------------------------
+
+    def _recent_transcript(self, conversation) -> str:
+        """Recent turns only, to bound prompt growth on long conversations."""
+        from app.assistant.config import get_assistant_settings
+
+        limit = get_assistant_settings().max_history_messages
+        lines = []
+        for message in conversation.recent_messages(limit):
+            speaker = "Patient" if message.role.value == "user" else "Assistant"
+            lines.append(f"{speaker}: {message.text}")
+        return "\n".join(lines)
+
+    def _build_answer(
+        self,
+        state: AssistantState,
+        payload: dict[str, Any],
+        snippets: list[RetrievedSnippet],
+    ) -> AssistantAnswer:
+        conversation = state["conversation"]
+        flags = state.get("red_flags") or []
+
+        causes = [
+            CauseItem(
+                cause=str(c.get("cause", "")).strip(),
+                confidence=self._as_enum(
+                    ConfidenceLabel, c.get("confidence"), ConfidenceLabel.MEDIUM
+                ),
+            )
+            for c in (payload.get("causes") or [])
+            if isinstance(c, dict) and str(c.get("cause", "")).strip()
+        ][:_MAX_CAUSES]
+
+        lifestyle = [
+            LifestyleAdviceItem(
+                category=str(a.get("category", "General")).strip() or "General",
+                description=str(a.get("description", "")).strip(),
+            )
+            for a in (payload.get("lifestyleAdvice") or [])
+            if isinstance(a, dict) and str(a.get("description", "")).strip()
+        ]
+
+        medicines = [
+            MedicineGuidance(
+                name=str(m.get("name", "")).strip(),
+                purpose=str(m.get("purpose", "")).strip(),
+                side_effects=_as_str_list(m.get("sideEffects"), 6),
+                precautions=str(m.get("precautions", "")).strip(),
+                type=self._as_enum(MedicineType, m.get("type"), MedicineType.OTC),
+            )
+            for m in (payload.get("medicines") or [])
+            if isinstance(m, dict) and str(m.get("name", "")).strip()
+        ]
+
+        specialist = None
+        raw_specialist = payload.get("specialist")
+        if isinstance(raw_specialist, dict) and raw_specialist.get("name"):
+            specialist = SpecialistSuggestion(
+                name=canonicalise_specialty(str(raw_specialist.get("name"))),
+                reason=str(raw_specialist.get("reason", "")).strip(),
+                priority=self._as_enum(
+                    SpecialistPriority,
+                    raw_specialist.get("priority"),
+                    SpecialistPriority.ROUTINE,
+                ),
+            )
+
+        # Urgency: never below the deterministic red-flag assessment.
+        urgency_level = UrgencyLevel.LOW
+        raw_urgency = payload.get("urgency")
+        if isinstance(raw_urgency, dict):
+            urgency_level = self._as_enum(
+                UrgencyLevel, raw_urgency.get("level"), UrgencyLevel.LOW
+            )
+        explanation = (
+            str(raw_urgency.get("explanation", "")).strip()
+            if isinstance(raw_urgency, dict)
+            else ""
+        )
+        if flags and urgency_level.rank < UrgencyLevel.EMERGENCY.rank:
+            urgency_level = UrgencyLevel.EMERGENCY
+
+        # Suppress questions already asked in earlier turns.
+        follow_ups = [
+            q
+            for q in _as_str_list(payload.get("followUpQuestions"), 6)
+            if not conversation.was_already_asked(q)
+        ][:_MAX_FOLLOW_UPS]
+
+        # Prefer the model's symptom list: it is already phrased in the
+        # patient's language. Grounded entities are a fallback only, so the UI
+        # never shows the same symptom twice in two languages.
+        symptoms = _as_str_list(payload.get("symptoms"), 12)
+        if not symptoms:
+            symptoms = [
+                e.value for e in state.get("entities", []) if e.kind == "symptom"
+            ][:12]
+
+        source = (
+            KnowledgeSource.RAG if snippets else KnowledgeSource.MODEL_ONLY
+        )
+        references = _as_str_list(payload.get("references"), 6)
+        for snippet in snippets:
+            if snippet.source and snippet.source not in references:
+                references.append(snippet.source)
+
+        return AssistantAnswer(
+            reply_text=str(payload.get("replyText", "")).strip()
+            or str(payload.get("summary", "")).strip(),
+            summary=str(payload.get("summary", "")).strip(),
+            symptoms=symptoms,
+            causes=causes,
+            actions=_as_str_list(payload.get("actions"), 8),
+            lifestyle_advice=lifestyle,
+            medicines=medicines,
+            specialist=specialist,
+            urgency=UrgencyAssessment(level=urgency_level, explanation=explanation),
+            emergency=None,
+            references=references[:6],
+            follow_up_questions=follow_ups,
+            conversation_title=str(payload.get("conversationTitle", "")).strip()
+            or conversation.title,
+            language=conversation.language,
+            intent=state.get("intent", IntentType.UNCLEAR),
+            confidence=min(1.0, max(0.0, _as_float(payload.get("confidence"), 0.7))),
+            knowledge_source=source,
+            red_flags=list(flags),
+            entities=list(state.get("entities", [])),
+            degraded=bool(state.get("degraded")),
+        )
+
+    @staticmethod
+    def _as_enum(enum_cls, raw: Any, default):
+        """Case-insensitive enum coercion with a safe default."""
+        if raw is None:
+            return default
+        text = str(raw).strip()
+        for member in enum_cls:
+            if member.value.casefold() == text.casefold():
+                return member
+        return default
+
+    def _fallback_answer(self, state: AssistantState) -> AssistantAnswer:
+        """
+        Deterministic reply used when the model is unavailable.
+
+        Says plainly that it could not analyse the message rather than emitting
+        empty cards that would look like a confident non-answer.
+        """
+        conversation = state["conversation"]
+        message = {
+            "hindi": (
+                "क्षमा करें, मैं अभी आपके संदेश का विश्लेषण नहीं कर पा रहा हूँ। "
+                "कृपया थोड़ी देर बाद पुनः प्रयास करें। यदि यह आपात स्थिति है तो "
+                "तुरंत डॉक्टर से संपर्क करें।"
+            ),
+            "hinglish": (
+                "Maaf kijiye, main abhi aapke message ka analysis nahi kar pa raha "
+                "hoon. Kripya thodi der baad dobara koshish karein. Agar yeh "
+                "emergency hai to turant doctor se sampark karein."
+            ),
+        }.get(
+            conversation.language.value,
+            "Sorry — I could not analyse your message just now. Please try again "
+            "shortly. If this is urgent, contact a doctor directly.",
+        )
+
+        return AssistantAnswer(
+            reply_text=message,
+            summary=message,
+            symptoms=list(conversation.known_symptoms),
+            language=conversation.language,
+            intent=state.get("intent", IntentType.UNCLEAR),
+            confidence=0.0,
+            knowledge_source=KnowledgeSource.NONE,
+            conversation_title=conversation.title,
+            red_flags=list(state.get("red_flags") or []),
+            entities=list(state.get("entities", [])),
+            degraded=True,
+        )
