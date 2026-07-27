@@ -40,15 +40,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             normalized_path = path[len(settings.API_V1_STR):]
 
         limit = None
+        bucket = normalized_path
         for route_pattern, max_limit in PROTECTED_PATHS.items():
             if normalized_path == route_pattern or normalized_path.startswith(route_pattern):
                 limit = max_limit
+                # Count against the *pattern*, not the exact path. Otherwise
+                # `/auth/login` and `/auth/login/doctor` keep separate counters
+                # and an attacker gets the budget twice over for one account —
+                # they are two doors into the same credential check.
+                bucket = route_pattern
                 break
 
         if limit is not None:
             client_ip = request.client.host if request.client else "unknown"
             window = int(time.time()) // 60
-            key = f"rate_limit:{client_ip}:{normalized_path}:{window}"
+            key = f"rate_limit:{client_ip}:{bucket}:{window}"
 
             try:
                 count = await redis_manager.incr(key)

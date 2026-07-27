@@ -17,8 +17,11 @@ from app.schemas.doctor import DoctorResponse
 from app.schemas.doctor_api import CaseResponse
 from app.schemas.patient_api import AppointmentResponse
 from app.schemas.admin_api import (
+    AdminAccountCapResponse,
     AdminAnalyticsResponse,
     AdminDashboardResponse,
+    AdminDoctorResponse,
+    PaginatedAdminDoctors,
     AuditLogResponse,
     CreateHospitalRequest,
     HospitalVerificationRequest,
@@ -203,7 +206,48 @@ async def list_pending_doctors(
     )
     return list(result.scalars().all())
 
-@router.put("/doctors/{id}/verify", response_model=DoctorResponse)
+@router.get("/doctors", response_model=PaginatedAdminDoctors)
+async def list_doctors_for_review(
+    verification_status: Optional[str] = Query(
+        None, pattern="^(verified|pending|rejected|expired|under_review)$"
+    ),
+    page: int = Query(1, ge=1, description="1-based page number."),
+    size: int = Query(25, ge=1, le=200, description="Clinicians per page."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    The clinician roster for the verification centre, one page at a time.
+
+    Unlike `/doctors/pending` this returns every clinician whatever their
+    status, joined to their account, so an administrator can review a decision
+    they have already made — unverify an approved doctor, or reconsider a
+    rejection — instead of only ever seeing the inbound queue.
+
+    Paged rather than capped. The earlier version returned a bare array bounded
+    at 100 rows with nothing to say it had stopped, so on a platform with more
+    clinicians than that the surplus were invisible to the only people who can
+    approve them.
+    """
+    return await admin_service.list_doctors_for_review(
+        db, verification_status, page=page, size=size
+    )
+
+@router.get("/doctors/{id}", response_model=AdminDoctorResponse)
+async def get_doctor_for_review(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    One clinician's complete record, including their Doctor ID.
+
+    Behind the admin role guard on this router: the Doctor ID is a sign-in
+    factor, so it is never served to anyone but an administrator.
+    """
+    return await admin_service.get_doctor_for_review(db, id)
+
+@router.put("/doctors/{id}/verify", response_model=AdminDoctorResponse)
 async def verify_doctor_profile(
     id: uuid.UUID,
     verify_in: VerifyDoctorRequest,
@@ -211,9 +255,55 @@ async def verify_doctor_profile(
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
-    Verify or reject a pending doctor's registration.
+    Approve, reject or unverify a clinician's registration.
+
+    Approving allocates the clinician's Doctor ID if they do not already hold
+    one; the response carries it so the administrator can pass it on. Every
+    doctor route re-reads the verification status per request, so unverifying
+    or rejecting ends an active session immediately rather than at its next
+    refresh.
     """
-    return await admin_service.verify_doctor(db, id, verify_in.verification_status)
+    doctor = await admin_service.verify_doctor(db, id, verify_in.verification_status)
+    decided_status = doctor.verification_status
+    payload = await admin_service.get_doctor_for_review(db, id)
+
+    # Commit before announcing. The session is otherwise committed by the `get_db`
+    # dependency *after* this function returns, so broadcasting here would tell
+    # every listener about a decision that a later failure could still roll back.
+    await db.commit()
+
+    from app.core.websocket import websocket_manager
+    await websocket_manager.broadcast_to_role({
+        "type": "DOCTOR_VERIFICATION_UPDATED",
+        "doctor_id": str(id),
+        "verification_status": decided_status,
+    }, "admin")
+    logger.info(
+        "[DOCTOR_VERIFICATION] admin=%s doctor=%s -> %s",
+        current_user.id, id, decided_status,
+    )
+    return payload
+
+@router.get("/admin-accounts", response_model=AdminAccountCapResponse)
+async def get_admin_account_cap(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    How many of the platform's administrator slots are in use.
+
+    The cap is enforced in the service layer and by a database trigger; this
+    route exists so the admin console can show the limit rather than let
+    somebody discover it by hitting an error.
+    """
+    from app.services.admin_accounts import MAX_ADMIN_ACCOUNTS, count_admin_accounts
+
+    in_use = await count_admin_accounts(db)
+    return {
+        "in_use": in_use,
+        "maximum": MAX_ADMIN_ACCOUNTS,
+        "slots_available": max(0, MAX_ADMIN_ACCOUNTS - in_use),
+    }
 
 @router.get("/hospitals", response_model=List[HospitalResponse])
 async def list_hospitals(

@@ -25,6 +25,7 @@ from tests.assistant.conftest import (
     ScriptedLLM,
     answer_payload,
 )
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -99,7 +100,7 @@ async def seeded(db):
 
 async def _login(client: AsyncClient, email: str) -> dict[str, str]:
     resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": "password123"}
+        "/api/v1/auth/login", json=await login_payload(email, "password123")
     )
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}

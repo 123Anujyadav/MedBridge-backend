@@ -164,6 +164,7 @@ class SupabaseJWTVerifier:
                     algorithms=[key.get("alg", header.get("alg", "ES256"))],
                     audience="authenticated",
                     options={"verify_aud": False},
+                    leeway=settings.SUPABASE_JWT_LEEWAY_SECONDS,
                 )
         except jwt.PyJWTError as exc:
             raise InvalidTokenError("Supabase token failed verification.") from exc
@@ -181,6 +182,7 @@ class SupabaseJWTVerifier:
                 algorithms=["HS256"],
                 audience="authenticated",
                 options={"verify_aud": False},
+                leeway=settings.SUPABASE_JWT_LEEWAY_SECONDS,
             )
         except jwt.PyJWTError as exc:
             raise InvalidTokenError("Supabase token failed verification.") from exc

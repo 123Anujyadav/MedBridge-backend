@@ -20,8 +20,12 @@ from app.core.security import (
 )
 from app.models.user import User
 from app.repositories.user import user_repository
-from app.services.doctor_access import assert_doctor_may_practise
+from app.services.doctor_access import (
+    assert_doctor_may_practise,
+    assert_doctor_sign_in,
+)
 from app.schemas.auth import (
+    DoctorLoginRequest,
     DoctorSignup,
     LoginRequest,
     PatientSignup,
@@ -183,32 +187,47 @@ class AuthService:
         await redis.set(f"verify_token:{verify_token}", str(user.id), ex=86400)
 
     async def login(
-        self, db: AsyncSession, login_data: LoginRequest, redis: Any
+        self, db: AsyncSession, login_data: LoginRequest, redis: Any,
+        *, doctors_only: bool = False,
     ) -> Token:
         """
         Verifies user credentials and issues Access/Refresh JWT tokens.
         Ensures 100% resilience against Redis downtime using in-memory fallback.
+
+        `doctors_only` is set by the clinician endpoint. It makes the role a
+        precondition of the sign-in rather than something noticed afterwards, so
+        a patient or an administrator posting to the clinician route is refused
+        before a session exists rather than handed one.
         """
         logger.info(f"[AUTH_LOGIN_ATTEMPT] Email: {login_data.email}")
 
         if _supabase_enabled():
-            return await self._login_via_supabase(db, login_data, redis)
+            return await self._login_via_supabase(
+                db, login_data, redis, doctors_only=doctors_only
+            )
 
         user = await user_repository.get_by_email(db, login_data.email)
         if not user or not verify_password(login_data.password, user.hashed_password):
             logger.warning(f"[AUTH_LOGIN_FAILED] Invalid credentials for email: {login_data.email}")
             raise AuthenticationException("Incorrect email or password.")
 
+        if doctors_only and user.role != "doctor":
+            logger.warning(
+                "[AUTH_LOGIN_FAILED] %s is not a clinician account", user.id
+            )
+            raise AuthenticationException("Incorrect email or password.")
+
         if not user.is_active:
             logger.warning(f"[AUTH_LOGIN_FAILED] User account deactivated: {user.id}")
             raise AuthorizationException("This user account has been deactivated.")
 
-        # A doctor must be approved by an administrator before they hold a
-        # session at all. Refusing here — rather than letting the token issue
-        # and blocking at the dashboard — means an unapproved clinician never
-        # holds a credential for this platform.
+        # A doctor signs in with three factors, and must be approved by an
+        # administrator before they hold a session at all. Refusing here —
+        # rather than letting the token issue and blocking at the dashboard —
+        # means an unapproved clinician never holds a credential for this
+        # platform.
         if user.role == "doctor":
-            await assert_doctor_may_practise(db, user)
+            await assert_doctor_sign_in(db, user, login_data.doctor_id)
 
         # Generate tokens
         access_token = create_access_token(
@@ -302,7 +321,8 @@ class AuthService:
             return None
 
     async def _login_via_supabase(
-        self, db: AsyncSession, login_data: LoginRequest, redis: Any
+        self, db: AsyncSession, login_data: LoginRequest, redis: Any,
+        *, doctors_only: bool = False,
     ) -> Token:
         """
         Authenticate against Supabase, then authorise against this database.
@@ -338,25 +358,40 @@ class AuthService:
         if not access_token or not refresh_token or not supabase_user_id:
             raise AuthenticationException("The authentication service returned an incomplete session.")
 
-        user = await resolve_local_user(db, VerifiedIdentity(
-            subject=str(supabase_user_id),
-            token_type="access",
-            email=supabase_user.get("email") or login_data.email,
-            provider="supabase",
-        ))
-        if user is None:
-            # Authenticated with the provider, but not a user of this platform.
-            logger.warning(
-                "[AUTH_LOGIN_NO_LOCAL_ACCOUNT] email=%s", login_data.email
-            )
-            raise AuthenticationException("Incorrect email or password.")
+        # Supabase has already minted a live session by this point. Every check
+        # below can still refuse it, and a refused sign-in must not leave a
+        # usable session behind at the provider — otherwise someone who knows a
+        # clinician's email and password but not their Doctor ID would be turned
+        # away here while a valid Supabase session sat waiting for them.
+        try:
+            user = await resolve_local_user(db, VerifiedIdentity(
+                subject=str(supabase_user_id),
+                token_type="access",
+                email=supabase_user.get("email") or login_data.email,
+                provider="supabase",
+            ))
+            if user is None:
+                # Authenticated with the provider, but not a user of this platform.
+                logger.warning(
+                    "[AUTH_LOGIN_NO_LOCAL_ACCOUNT] email=%s", login_data.email
+                )
+                raise AuthenticationException("Incorrect email or password.")
 
-        if not user.is_active:
-            logger.warning(f"[AUTH_LOGIN_FAILED] User account deactivated: {user.id}")
-            raise AuthorizationException("This user account has been deactivated.")
+            if doctors_only and user.role != "doctor":
+                logger.warning(
+                    "[AUTH_LOGIN_FAILED] %s is not a clinician account", user.id
+                )
+                raise AuthenticationException("Incorrect email or password.")
 
-        if user.role == "doctor":
-            await assert_doctor_may_practise(db, user)
+            if not user.is_active:
+                logger.warning(f"[AUTH_LOGIN_FAILED] User account deactivated: {user.id}")
+                raise AuthorizationException("This user account has been deactivated.")
+
+            if user.role == "doctor":
+                await assert_doctor_sign_in(db, user, login_data.doctor_id)
+        except Exception:
+            await self._revoke_provider_session(access_token)
+            raise
 
         await redis.set(
             f"active_session:{user.id}", refresh_token,
@@ -367,6 +402,60 @@ class AuthService:
             user.id, user.role,
         )
         return Token(access_token=access_token, refresh_token=refresh_token)
+
+    async def _revoke_provider_session(self, access_token: str | None) -> None:
+        """
+        Throw away a Supabase session this platform has decided not to honour.
+
+        Best effort by design: the caller is already raising the real error, and
+        a provider hiccup while cleaning up must not replace a precise "wrong
+        Doctor ID" with an opaque 500.
+        """
+        if not access_token or not _supabase_enabled():
+            return
+        from app.core.supabase import SupabaseAuthError, get_supabase_auth_client
+
+        try:
+            await get_supabase_auth_client().sign_out(access_token)
+        except SupabaseAuthError as exc:
+            logger.warning("[AUTH_REJECTED_SESSION_NOT_REVOKED] %s", exc.message)
+
+    async def login_doctor(
+        self, db: AsyncSession, login_data: DoctorLoginRequest, redis: Any
+    ) -> Token:
+        """
+        The clinician sign-in: Doctor ID, email and password, all three required.
+
+        A thin adapter onto `login`, not a second authentication system. The
+        credential is proven by the same provider, the session is issued by the
+        same code, and the approval rule is the same one the doctor API guard
+        uses — the only difference is that the schema makes the Doctor ID
+        mandatory instead of optional.
+
+        Every credential failure is flattened to one message. Without this the
+        endpoint distinguishes a wrong password ("Incorrect email or password")
+        from a wrong Doctor ID, which is enough to confirm a stolen password and
+        then brute-force the remaining factor with a clear signal for each
+        guess. Authorisation failures — awaiting approval, rejected, suspended —
+        are left alone: they only happen once all three factors have matched, so
+        there is nobody left to tell anything to.
+        """
+        logger.info("[AUTH_DOCTOR_LOGIN_ATTEMPT] Email: %s", login_data.email)
+        try:
+            return await self.login(
+                db,
+                LoginRequest(
+                    email=login_data.email,
+                    password=login_data.password,
+                    doctor_id=login_data.doctor_id,
+                ),
+                redis,
+                doctors_only=True,
+            )
+        except AuthenticationException:
+            from app.services.doctor_access import BAD_DOCTOR_CREDENTIALS_MESSAGE
+
+            raise AuthenticationException(BAD_DOCTOR_CREDENTIALS_MESSAGE)
 
     async def refresh_token(
         self, db: AsyncSession, refresh_token: str, redis: Any

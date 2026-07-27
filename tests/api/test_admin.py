@@ -8,6 +8,7 @@ from app.models.doctor import Doctor
 from app.models.hospital import Hospital
 from app.models.audit import AuditLog
 from app.core.security import get_password_hash
+from conftest import login_payload
 
 @pytest.fixture
 async def setup_admin_data(db):
@@ -104,8 +105,8 @@ async def setup_admin_data(db):
 @pytest.mark.asyncio
 async def test_admin_dashboard_and_monitor(client: AsyncClient, setup_admin_data, db):
     # Log in as Admin
-    login_payload = {"email": "admin.system@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("admin.system@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     assert login_resp.status_code == 200
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
@@ -131,8 +132,8 @@ async def test_admin_user_and_verification_ops(client: AsyncClient, setup_admin_
     doctor_id = setup_doctor_data_id = setup_admin_data["doctor_id"]
 
     # Log in
-    login_payload = {"email": "admin.system@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("admin.system@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -163,8 +164,8 @@ async def test_admin_user_and_verification_ops(client: AsyncClient, setup_admin_
 @pytest.mark.asyncio
 async def test_admin_hospitals_and_audit_logs(client: AsyncClient, setup_admin_data, db):
     # Log in
-    login_payload = {"email": "admin.system@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("admin.system@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 

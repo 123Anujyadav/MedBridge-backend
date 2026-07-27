@@ -12,6 +12,7 @@ from app.models.appointment import Appointment
 from app.models.case import Case
 from app.models.notification import NotificationItem
 from app.core.security import get_password_hash
+from conftest import login_payload
 
 @pytest.fixture
 async def setup_shared_data(db):
@@ -150,8 +151,8 @@ async def setup_shared_data(db):
 @pytest.mark.asyncio
 async def test_shared_uploads_and_notifications(client: AsyncClient, setup_shared_data, db):
     # Log in as Patient
-    login_payload = {"email": "patient.shared@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("patient.shared@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -185,8 +186,8 @@ async def test_shared_search_calendar_and_timeline(client: AsyncClient, setup_sh
     case_id = setup_shared_data["case_id"]
 
     # Log in
-    login_payload = {"email": "patient.shared@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("patient.shared@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -219,8 +220,8 @@ async def test_shared_search_calendar_and_timeline(client: AsyncClient, setup_sh
 @pytest.mark.asyncio
 async def test_shared_audit_settings_and_feedback(client: AsyncClient, setup_shared_data, db):
     # Log in
-    login_payload = {"email": "patient.shared@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("patient.shared@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 

@@ -7,6 +7,7 @@ from app.api.deps import get_db, get_redis, get_current_user
 from app.core.exceptions import AuthenticationException
 from app.models.user import User
 from app.schemas.auth import (
+    DoctorLoginRequest,
     DoctorSignup,
     ForgotPasswordRequest,
     LoginRequest,
@@ -54,8 +55,30 @@ async def login(
 ) -> Any:
     """
     Authenticate email credentials and issue access/refresh token pair.
+
+    Patients and administrators present email and password. A clinician must
+    additionally present their Doctor ID — the service refuses a doctor account
+    without it, so this route cannot be used to sign a doctor in with two
+    factors. Clinicians should use `/login/doctor`, which makes the requirement
+    explicit in the schema.
     """
     return await auth_service.login(db, login_data, redis)
+
+@router.post("/login/doctor", response_model=Token)
+async def login_doctor(
+    login_data: DoctorLoginRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis)
+) -> Any:
+    """
+    Clinician sign-in: Doctor ID, email and password.
+
+    All three must belong to the same approved clinician. Every way the three
+    can fail to line up returns the same message, so the endpoint cannot be used
+    to discover which Doctor ID belongs to a known email address, or whether a
+    given clinician has been approved yet.
+    """
+    return await auth_service.login_doctor(db, login_data, redis)
 
 @router.post("/refresh", response_model=Token)
 async def refresh(

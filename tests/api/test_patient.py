@@ -10,6 +10,7 @@ from app.models.appointment import Appointment
 from app.models.prescription import Prescription, Medication
 from app.models.report import Report
 from app.core.security import get_password_hash
+from conftest import login_payload
 
 @pytest.fixture
 async def setup_patient_data(db):
@@ -97,8 +98,8 @@ async def setup_patient_data(db):
 @pytest.mark.asyncio
 async def test_patient_profile_and_consent(client: AsyncClient, setup_patient_data, db):
     # Log in to get access token
-    login_payload = {"email": "john.doe@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("john.doe@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     assert login_resp.status_code == 200
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
@@ -126,8 +127,8 @@ async def test_patient_appointment_scheduling(client: AsyncClient, setup_patient
     doctor_id = setup_patient_data["doctor_id"]
 
     # Log in
-    login_payload = {"email": "john.doe@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("john.doe@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -228,8 +229,8 @@ async def test_patient_dashboard(client: AsyncClient, setup_patient_data, db):
     await db.commit()
 
     # Log in
-    login_payload = {"email": "john.doe@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("john.doe@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -255,8 +256,8 @@ async def test_patient_dashboard(client: AsyncClient, setup_patient_data, db):
 @pytest.mark.asyncio
 async def test_patient_emergency_panic(client: AsyncClient, setup_patient_data, db):
     # Log in
-    login_payload = {"email": "john.doe@aronofy.com", "password": "password123"}
-    login_resp = await client.post("/api/v1/auth/login", json=login_payload)
+    _login_body = await login_payload("john.doe@aronofy.com", "password123")
+    login_resp = await client.post("/api/v1/auth/login", json=_login_body)
     token = login_resp.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 

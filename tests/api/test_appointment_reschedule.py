@@ -18,6 +18,7 @@ from app.models.appointment import Appointment
 from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.user import User
+from conftest import login_payload
 
 
 @pytest.fixture
@@ -118,7 +119,7 @@ async def booking_world(db):
 async def _patient_headers(client: AsyncClient) -> dict[str, str]:
     resp = await client.post(
         "/api/v1/auth/login",
-        json={"email": "appt.patient@aronofy.com", "password": "password123"},
+        json=await login_payload("appt.patient@aronofy.com", "password123"),
     )
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
@@ -318,7 +319,7 @@ class TestAppointmentReschedule:
 
         login = await client.post(
             "/api/v1/auth/login",
-            json={"email": "appt.other@aronofy.com", "password": "password123"},
+            json=await login_payload("appt.other@aronofy.com", "password123"),
         )
         headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 

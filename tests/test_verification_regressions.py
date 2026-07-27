@@ -39,6 +39,7 @@ from app.schemas.patient_api import AppointmentCreateRequest
 from app.services.admin import admin_service
 from app.services.appointment import appointment_service
 from app.core.exceptions import BusinessRuleValidationException
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -89,7 +90,7 @@ class TestTokenIdentity:
         await db.commit()
 
         login = await client.post("/api/v1/auth/login",
-                                  json={"email": email, "password": PW})
+                                  json=await login_payload(email, PW))
         assert login.status_code == 200, login.text
 
         first = await client.post(

@@ -1,6 +1,7 @@
 import uuid
 from sqlalchemy import CheckConstraint, Float, ForeignKey, Integer, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.doctor_code import generate_doctor_code
 from app.db.base_class import Base
 
 class Doctor(Base):
@@ -18,7 +19,28 @@ class Doctor(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True
     )
-    
+
+    doctor_code: Mapped[str] = mapped_column(
+        String(8),
+        unique=True,
+        index=True,
+        nullable=True,
+        default=generate_doctor_code,
+    )
+    """
+    The clinician's 8-character Doctor ID — the third sign-in factor.
+
+    Named `doctor_code` rather than `doctor_id` deliberately: `doctor_id` is
+    already the UUID foreign key on appointments, cases and prescriptions, and
+    two columns of that name meaning different things is the kind of collision
+    that eventually routes a record to the wrong clinician. It is presented to
+    people as "Doctor ID" everywhere in the UI and the API documentation.
+
+    Generated on insert so no doctor row can exist without one. Nullable only
+    because rows written before this column existed have to be backfilled by
+    migration rather than rejected.
+    """
+
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone: Mapped[str] = mapped_column(String(50), nullable=False)

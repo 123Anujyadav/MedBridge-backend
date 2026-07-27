@@ -85,6 +85,21 @@ class Settings(BaseSettings):
     SUPABASE_TIMEOUT_SECONDS: float = 15.0
     SUPABASE_JWKS_CACHE_SECONDS: int = 600
 
+    SUPABASE_JWT_LEEWAY_SECONDS: int = 60
+    """
+    Clock tolerance when validating `iat`, `nbf` and `exp` on Supabase tokens.
+
+    Supabase stamps `iat` from its own clock. A host running even a fraction of
+    a second behind it therefore sees a freshly minted token as issued in the
+    future, and PyJWT refuses it — so a user signs in successfully and is
+    immediately logged out by their first authenticated request. The failure is
+    intermittent by nature, which is what makes it worth a deliberate tolerance
+    rather than an assumption that the clocks agree.
+
+    A minute of leeway does not meaningfully extend a token's life (they run to
+    an hour) and is the usual allowance for distributed clock drift.
+    """
+
     SUPABASE_AUTOCONFIRM_SIGNUP: bool = False
     """
     Whether a newly registered address is confirmed without an email round trip.

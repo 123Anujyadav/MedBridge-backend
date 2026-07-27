@@ -24,6 +24,7 @@ from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.report import Report
 from app.models.user import User
+from conftest import login_payload
 
 
 @pytest.fixture
@@ -109,7 +110,7 @@ async def history_world(db):
 
 async def _headers(client: AsyncClient, email: str) -> dict[str, str]:
     resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": "password123"}
+        "/api/v1/auth/login", json=await login_payload(email, "password123")
     )
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}

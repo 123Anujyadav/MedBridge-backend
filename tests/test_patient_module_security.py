@@ -20,6 +20,7 @@ from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.report import Report
 from app.models.user import User
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -109,7 +110,7 @@ async def two_doctors_two_patients(db):
 
 async def _login(client: AsyncClient, key: str) -> dict[str, str]:
     resp = await client.post(
-        "/api/v1/auth/login", json={"email": f"{key}.sec@aronofy.com", "password": PW}
+        "/api/v1/auth/login", json=await login_payload(f"{key}.sec@aronofy.com", PW)
     )
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}

@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.core.security import get_password_hash
 from app.models.patient import Patient
 from app.models.user import User
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -60,7 +61,7 @@ async def vitals_patient(db):
 
 async def _login(client: AsyncClient, email: str) -> dict[str, str]:
     resp = await client.post(
-        "/api/v1/auth/login", json={"email": email, "password": PW}
+        "/api/v1/auth/login", json=await login_payload(email, PW)
     )
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
@@ -238,7 +239,7 @@ class TestAccessControl:
 
         resp = await client.post(
             "/api/v1/auth/login",
-            json={"email": "vitals.doc@aronofy.com", "password": PW},
+            json=await login_payload("vitals.doc@aronofy.com", PW),
         )
         headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
         assert (

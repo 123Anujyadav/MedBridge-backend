@@ -2,6 +2,7 @@ import pytest
 import uuid
 from app.models.user import User
 from app.core.security import get_password_hash
+from conftest import login_payload
 
 class MockWebSocket:
     def __init__(self):
@@ -79,7 +80,7 @@ async def test_websocket_auth_and_echo(client, setup_websocket_data, db):
     # 1. Login to get Patient token
     login_resp = await client.post(
         "/api/v1/auth/login",
-        json={"email": "patient.ws@aronofy.com", "password": "password123"}
+        json=await login_payload("patient.ws@aronofy.com", "password123")
     )
     assert login_resp.status_code == 200
     patient_token = login_resp.json()["access_token"]
@@ -87,7 +88,7 @@ async def test_websocket_auth_and_echo(client, setup_websocket_data, db):
     # 2. Login to get Doctor token
     login_resp = await client.post(
         "/api/v1/auth/login",
-        json={"email": "doctor.ws@aronofy.com", "password": "password123"}
+        json=await login_payload("doctor.ws@aronofy.com", "password123")
     )
     assert login_resp.status_code == 200
     doctor_token = login_resp.json()["access_token"]

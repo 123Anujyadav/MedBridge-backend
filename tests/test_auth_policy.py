@@ -29,6 +29,7 @@ from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.user import User
 from app.services.doctor_access import AWAITING_APPROVAL_MESSAGE
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -64,7 +65,7 @@ async def estate(db):
 
 async def login(client: AsyncClient, email: str, password: str = PW):
     return await client.post("/api/v1/auth/login",
-                             json={"email": email, "password": password})
+                             json=await login_payload(email, password))
 
 
 async def auth(client: AsyncClient, email: str) -> dict[str, str]:

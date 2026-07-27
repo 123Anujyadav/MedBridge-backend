@@ -34,6 +34,7 @@ from app.models.doctor import Doctor
 from app.models.patient import Patient
 from app.models.user import User
 from app.services.doctor_access import AWAITING_APPROVAL_MESSAGE
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -220,7 +221,7 @@ async def signup_doctor(client: AsyncClient, email=DOCTOR):
 
 async def login(client: AsyncClient, email, password=PW):
     return await client.post("/api/v1/auth/login",
-                             json={"email": email, "password": password})
+                             json=await login_payload(email, password))
 
 
 class TestSignup:

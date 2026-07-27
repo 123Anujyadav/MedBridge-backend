@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
-from app.core.exceptions import EntityNotFoundException
+from app.core.exceptions import (
+    BusinessRuleValidationException,
+    EntityNotFoundException,
+)
 from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.hospital import Hospital
@@ -145,35 +148,176 @@ class AdminService:
     async def update_user_status(self, db: AsyncSession, user_id: uuid.UUID, active: bool) -> User:
         """
         Deactivates or reactivates a user's login access.
+
+        This is the switch behind the administrator's "suspend" action on a
+        clinician: `get_current_active_user` reads `is_active` on every request,
+        so suspending ends an in-flight session rather than waiting for it to
+        expire.
         """
         user = await user_repository.get(db, user_id)
         if not user:
             raise EntityNotFoundException("User", str(user_id))
 
+        if active and not user.is_active and user.role == "admin":
+            # Reinstating an administrator is a creation as far as the cap is
+            # concerned — a retired administrator gave up their slot, and it may
+            # have been taken since.
+            from app.services.admin_accounts import assert_admin_slot_available
+
+            await assert_admin_slot_available(db)
+
         user.is_active = active
         await db.flush()
         await db.refresh(user)
-        
+
         logger.info(f"User {user_id} active status updated to: {active}")
         return user
 
     async def verify_doctor(self, db: AsyncSession, doctor_id: uuid.UUID, status_str: str) -> Doctor:
         """
-        Approves or updates verification status for a clinical doctor account.
+        Record an administrator's decision on a clinician's credentials.
+
+        Approval is the only action that touches the Doctor ID: an approved
+        clinician must have one, because it is a factor in their sign-in, so one
+        is allocated if the profile does not already hold a valid one. An
+        existing valid ID is left alone — reissuing it on every re-approval
+        would lock out a clinician who had already been told theirs.
+
+        Rejecting or unverifying deliberately does *not* clear the ID. The ID
+        alone grants nothing; keeping it means a clinician who is reinstated
+        does not have to be re-issued credentials, and it stays visible in the
+        admin queue for support.
         """
         doctor = await doctor_repository.get(db, doctor_id)
         if not doctor:
             raise EntityNotFoundException("Doctor", str(doctor_id))
 
-        doctor.verification_status = status_str
         if status_str == "verified":
+            from app.core.doctor_code import assign_doctor_code, is_valid_doctor_code
+
+            if not is_valid_doctor_code(doctor.doctor_code):
+                # `assign_doctor_code` retries through a lost allocation race
+                # rather than surfacing a unique-index violation as a 500.
+                await assign_doctor_code(db, doctor)
+                logger.info("[DOCTOR_ID_ISSUED] doctor=%s", doctor_id)
+
+            if not is_valid_doctor_code(doctor.doctor_code):
+                # Belt and braces for the invariant the database also enforces:
+                # approving a clinician who holds no Doctor ID would produce an
+                # account that is authorised to practise but can never sign in,
+                # because the ID is one of the three sign-in factors.
+                raise BusinessRuleValidationException(
+                    "This clinician could not be issued a Doctor ID, so the "
+                    "account cannot be approved. Please retry."
+                )
+
             doctor.verified_date = datetime.now(timezone.utc).isoformat()
-            
+
+        doctor.verification_status = status_str
+
         await db.flush()
         await db.refresh(doctor)
-        
+
         logger.info(f"Doctor {doctor_id} verification updated to: {status_str}")
         return doctor
+
+    @staticmethod
+    def _doctor_review_row(doctor: Doctor, user: User | None) -> dict:
+        """
+        Flatten a clinician's profile and their account into one review record.
+
+        The verification screen judges a person, not a table: their licence and
+        their specialty live on `doctors`, but whether the account is suspended
+        and when they registered live on `users`, and an administrator deciding
+        on approval needs both in front of them.
+        """
+        return {
+            "id": doctor.id,
+            "doctor_code": doctor.doctor_code,
+            "email": user.email if user else None,
+            "is_active": bool(user.is_active) if user else False,
+            "account_verified": bool(user.is_verified) if user else False,
+            "registered_at": user.created_at if user else doctor.created_at,
+            "first_name": doctor.first_name,
+            "last_name": doctor.last_name,
+            "phone": doctor.phone,
+            "specialty": doctor.specialty,
+            "sub_specialties": doctor.sub_specialties or [],
+            "hospital_id": doctor.hospital_id,
+            "hospital_name": doctor.hospital_name,
+            "license_number": doctor.license_number,
+            "years_of_experience": doctor.years_of_experience or 0,
+            "education": doctor.education or [],
+            "certifications": doctor.certifications or [],
+            "languages": doctor.languages or [],
+            "avatar_url": doctor.avatar_url,
+            "bio": doctor.bio,
+            "rating": doctor.rating or 0.0,
+            "total_patients": doctor.total_patients or 0,
+            "total_cases": doctor.total_cases or 0,
+            "availability": doctor.availability,
+            "consultation_fee": doctor.consultation_fee or 0.0,
+            "verification_status": doctor.verification_status,
+            "verified_date": doctor.verified_date,
+        }
+
+    async def list_doctors_for_review(
+        self, db: AsyncSession, status_filter: str | None = None,
+        page: int = 1, size: int = 25,
+    ) -> dict:
+        """
+        One page of the administrator's clinician roster, newest first.
+
+        Two queries: a COUNT so the caller knows how much it has *not* been
+        shown, and the page itself. Both go through
+        `ix_doctors_verification_status_created_at`, so neither scans the table.
+
+        The rows come from a single outer join rather than a lookup per doctor
+        — the verification queue is the screen an administrator opens most, and
+        a per-row query for the email address would be an N+1 on the hot path.
+        """
+        filters = [Doctor.deleted_at.is_(None)]
+        if status_filter:
+            filters.append(Doctor.verification_status == status_filter)
+
+        total = int(
+            await db.scalar(select(func.count(Doctor.id)).where(*filters)) or 0
+        )
+
+        page = max(1, page)
+        pages = max(1, -(-total // size))  # ceiling division
+        result = await db.execute(
+            select(Doctor, User)
+            .outerjoin(User, User.id == Doctor.id)
+            .where(*filters)
+            .order_by(Doctor.created_at.desc(), Doctor.id)
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+
+        return {
+            "items": [self._doctor_review_row(d, u) for d, u in result.all()],
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": pages,
+            "has_next": page < pages,
+            "has_prev": page > 1,
+        }
+
+    async def get_doctor_for_review(
+        self, db: AsyncSession, doctor_id: uuid.UUID
+    ) -> dict:
+        """One clinician's full record, for the profile view."""
+        result = await db.execute(
+            select(Doctor, User)
+            .outerjoin(User, User.id == Doctor.id)
+            .where(Doctor.id == doctor_id)
+        )
+        row = result.first()
+        if row is None:
+            raise EntityNotFoundException("Doctor", str(doctor_id))
+        return self._doctor_review_row(row[0], row[1])
 
     async def verify_hospital(self, db: AsyncSession, hospital_id: uuid.UUID, status_str: str) -> Hospital:
         """

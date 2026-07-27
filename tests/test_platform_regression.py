@@ -32,6 +32,7 @@ from app.models.doctor import Doctor
 from app.models.notification import NotificationItem
 from app.models.patient import Patient
 from app.models.user import User
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,7 +103,7 @@ async def estate(db):
 
 
 async def _login(client: AsyncClient, email: str) -> dict[str, str]:
-    r = await client.post("/api/v1/auth/login", json={"email": email, "password": PW})
+    r = await client.post("/api/v1/auth/login", json=await login_payload(email, PW))
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 

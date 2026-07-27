@@ -30,6 +30,7 @@ from app.models.patient import Patient
 from app.models.report import Report
 from app.models.user import User
 from app.services import ai_report as ai_report_module
+from conftest import login_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -229,7 +230,7 @@ async def clinic(db):
 
 
 async def _login(client: AsyncClient, email: str) -> dict[str, str]:
-    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": PW})
+    resp = await client.post("/api/v1/auth/login", json=await login_payload(email, PW))
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 

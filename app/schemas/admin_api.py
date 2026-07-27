@@ -7,7 +7,94 @@ class UserStatusUpdateRequest(BaseModel):
     is_active: bool
 
 class VerifyDoctorRequest(BaseModel):
-    verification_status: str = Field(pattern="^(verified|rejected|under_review)$")
+    """
+    An administrator's decision on a clinician's credentials.
+
+    `pending` is the "unverify" action: it returns an approved clinician to the
+    queue and, because every doctor route re-reads this status per request,
+    ends their access immediately rather than at their next sign-in.
+    """
+
+    verification_status: str = Field(
+        pattern="^(verified|rejected|under_review|pending)$"
+    )
+
+
+class AdminDoctorResponse(BaseModel):
+    """
+    Everything an administrator needs in order to judge a clinician.
+
+    Wider than `DoctorResponse` on purpose — it carries the account-level facts
+    that live on `users` (email, whether the account is suspended, when they
+    registered) alongside the clinical profile, so the verification queue is one
+    request rather than one per doctor.
+
+    `doctor_code` is included because the administrator is the only person who
+    can tell a newly approved clinician what their Doctor ID is. This response
+    is reachable only behind `RoleChecker(["admin"])`.
+    """
+
+    id: uuid.UUID
+    doctor_code: Optional[str] = None
+
+    email: Optional[str] = None
+    is_active: bool = True
+    account_verified: bool = False
+    registered_at: Optional[datetime] = None
+
+    first_name: str
+    last_name: str
+    phone: str
+    specialty: str
+    sub_specialties: List[str] = Field(default_factory=list)
+    hospital_id: Optional[uuid.UUID] = None
+    hospital_name: Optional[str] = None
+    license_number: str
+    years_of_experience: int = 0
+    education: List[str] = Field(default_factory=list)
+    certifications: List[str] = Field(default_factory=list)
+    languages: List[str] = Field(default_factory=list)
+    avatar_url: Optional[str] = None
+    bio: Optional[str] = None
+    rating: float = 0.0
+    total_patients: int = 0
+    total_cases: int = 0
+    availability: Optional[str] = None
+    consultation_fee: float = 0.0
+    verification_status: str
+    verified_date: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PaginatedAdminDoctors(BaseModel):
+    """
+    One page of the clinician roster, with enough context to navigate it.
+
+    The list version of this endpoint silently returned only the first 100
+    clinicians — an administrator on a platform with more than that simply could
+    not see, and therefore could not approve, the rest. Carrying `total` and
+    `pages` is what makes the truncation visible instead of invisible.
+    """
+
+    items: List[AdminDoctorResponse]
+    total: int
+    """Clinicians matching the filter, across every page."""
+
+    page: int
+    size: int
+    pages: int
+    has_next: bool
+    has_prev: bool
+
+
+class AdminAccountCapResponse(BaseModel):
+    """How many administrator slots are in use, and the ceiling."""
+
+    in_use: int
+    maximum: int
+    slots_available: int
 
 class HospitalCoordinates(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)

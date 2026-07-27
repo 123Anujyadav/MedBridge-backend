@@ -126,14 +126,43 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(IntegrityError)
     async def db_integrity_handler(request: Request, exc: IntegrityError):
-        logger.error(f"Database constraint violation on {request.url.path}: {str(exc)}")
+        """
+        Turn a constraint violation into an answer, without quoting the database.
+
+        The full error is logged; it is not returned. The previous version put
+        `str(exc.orig)` in `details`, which handed the caller constraint names,
+        column names and trigger text — a free description of the schema from an
+        unauthenticated endpoint.
+        """
+        logger.error(
+            f"Database constraint violation on {request.url.path}: {str(exc)}"
+        )
+
+        # The administrator cap is a business rule that happens to be enforced by
+        # a trigger. Answer it in the same words the service layer uses, so the
+        # client cannot tell which layer refused.
+        from app.services.admin_accounts import (
+            CAP_REACHED_MESSAGE, is_admin_cap_violation,
+        )
+
+        if is_admin_cap_violation(exc):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "success": False,
+                    "message": CAP_REACHED_MESSAGE,
+                    "code": "BUSINESS_RULE_VALIDATION_FAILED",
+                    "details": CAP_REACHED_MESSAGE,
+                }
+            )
+
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
                 "success": False,
                 "message": "Database resource conflict or unique constraint violation.",
                 "code": "RESOURCE_CONFLICT",
-                "details": str(exc.orig) if hasattr(exc, 'orig') else str(exc)
+                "details": "The request conflicts with existing data."
             }
         )
 
