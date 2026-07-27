@@ -1,38 +1,73 @@
+import logging
 import os
 from groq import Groq
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-try:
-    from langchain_huggingface import HuggingFaceEmbeddings
-except ImportError:
-    try:
-        
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-    except ImportError:
-        class HuggingFaceEmbeddings:
-            def __init__(self, model_name="all-MiniLM-L6-v2"):
-                pass
-            def embed_documents(self, texts):
-                return [[0.0] * 384 for _ in texts]
-            def embed_query(self, text):
-                return [0.0] * 384
-
-from langchain_community.vectorstores import FAISS
 
 from app.core.ai_provider import get_groq_api_key, get_groq_model
+
+logger = logging.getLogger(__name__)
+
+
+def _load_embeddings(model_name: str):
+    """
+    Load the HuggingFace embedding model on first use.
+
+    Imported here rather than at module scope on purpose. `app.ai_core` is
+    re-exported into the FastAPI app, so a module-level import pulled
+    sentence-transformers and torch into *every* process at startup — roughly a
+    gigabyte of resident memory before a single request, on a container that
+    also has to run the assistant. Only `/ai/chat` needs this model, so only
+    `/ai/chat` should pay for it.
+
+    Raises on failure instead of substituting zero vectors: an embedder that
+    returns `[0.0] * 384` makes FAISS return arbitrary passages, which reads as
+    a confident answer grounded in the wrong part of a medical report.
+    """
+    try:
+        from langchain_huggingface import HuggingFaceEmbeddings
+    except ImportError:
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+
+    logger.info("[CHAT_AGENT] loading embedding model %s", model_name)
+    return HuggingFaceEmbeddings(model_name=model_name)
 
 class ChatAgent:
     """
     RAG Agent for question answering over medical report contexts.
     Framework-agnostic Python class.
     """
+    EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
     def __init__(self, api_key: str = None):
         self.api_key = api_key or get_groq_api_key()
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, chunk_overlap=200
-        )
+        self._embeddings = None
+        self._text_splitter = None
         self.client = Groq(api_key=self.api_key) if self.api_key else None
         self.model_name = get_groq_model()
+
+    @property
+    def embeddings(self):
+        """The embedding model, loaded once on first vector-store build."""
+        if self._embeddings is None:
+            self._embeddings = _load_embeddings(self.EMBEDDING_MODEL)
+        return self._embeddings
+
+    @property
+    def text_splitter(self):
+        """
+        The chunker, built on first use.
+
+        Deferred for the same reason as the embeddings: importing
+        `langchain_text_splitters` executes its package `__init__`, which
+        imports sentence-transformers (and therefore torch) unconditionally.
+        Importing a submodule does not avoid it — only deferring does.
+        """
+        if self._text_splitter is None:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+            self._text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000, chunk_overlap=200
+            )
+        return self._text_splitter
 
     def initialize_vector_store(self, text_content: str):
         """Create FAISS vector store from medical report text content."""
@@ -42,6 +77,10 @@ class ChatAgent:
         texts = self.text_splitter.split_text(text_content)
         if not texts:
             texts = [text_content]
+
+        # Imported lazily for the same reason as the embeddings: FAISS pulls in
+        # its own native extension and is only needed on this path.
+        from langchain_community.vectorstores import FAISS
 
         return FAISS.from_texts(texts, self.embeddings)
     

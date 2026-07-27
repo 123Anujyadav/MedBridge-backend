@@ -23,7 +23,7 @@ class AssistantGroqAdapter(GroqClient):
     def __init__(self, config: AIProviderConfig | None = None) -> None:
         super().__init__(config=config)
 
-    async def health(self) -> dict[str, Any]:
-        payload = await super().health()
+    async def health(self, *, probe: bool = False) -> dict[str, Any]:
+        payload = await super().health(probe=probe)
         payload.setdefault("component", "assistant")
         return payload

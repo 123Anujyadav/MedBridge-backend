@@ -104,15 +104,20 @@ class LangGraphAssistantPipeline:
             "snippets": [],
             "red_flags": [],
             "degraded": False,
+            "soft_failures": [],
             "rejected_entities": 0,
         }
 
         try:
             final: AssistantState = await self._graph.ainvoke(initial)
-        except Exception:
+        except Exception as exc:
+            # Full traceback plus the exception type: an unhandled pipeline error
+            # is a code defect and must never be reduced to a one-line message.
             logger.exception(
-                "[ASSISTANT_PIPELINE_FAILED] conversation=%s",
+                "[ASSISTANT_PIPELINE_FAILED] conversation=%s error=%s: %s",
                 conversation.conversation_id,
+                type(exc).__name__,
+                exc,
             )
             return AssistantAnswer(
                 reply_text=(

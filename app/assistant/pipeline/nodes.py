@@ -78,6 +78,16 @@ def _as_str_list(value: Any, limit: int = 10) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()][:limit]
 
 
+def _note_soft_failure(state: AssistantState, stage: str, reason: str) -> None:
+    """
+    Record that an enrichment stage fell back.
+
+    Kept out of `degraded` on purpose: these stages improve an answer, they do
+    not constitute one.
+    """
+    state.setdefault("soft_failures", []).append(f"{stage}: {reason}")
+
+
 class AssistantNodes:
     """
     Dependency-injected node collection.
@@ -88,6 +98,17 @@ class AssistantNodes:
 
     def __init__(self, *, llm) -> None:
         self._llm = llm
+
+    def _llm_error(self) -> str:
+        """
+        The provider's reason for returning nothing.
+
+        Node-level logs previously recorded only *that* a stage got an empty
+        payload, so diagnosing a degraded reply meant guessing between a missing
+        key, a revoked key and a decommissioned model. Test doubles need not
+        implement `last_error`.
+        """
+        return getattr(self._llm, "last_error", None) or "no detail from provider"
 
     # -- stage 1: language + deterministic safety scan ---------------------
 
@@ -102,6 +123,7 @@ class AssistantNodes:
         raw = state.get("user_text", "")
         state["user_text"] = sanitize_prompt_input(raw, max_length=4000)
         state.setdefault("degraded", False)
+        state.setdefault("soft_failures", [])
         state.setdefault("rejected_entities", 0)
 
         conversation.language = detect_language(state["user_text"])
@@ -135,7 +157,17 @@ class AssistantNodes:
         try:
             state["intent"] = IntentType(raw)
         except ValueError:
-            state["degraded"] = True
+            # A missed classification is not a degraded answer: the answer stage
+            # runs next and works from the transcript, not from this label.
+            reason = (
+                self._llm_error() if not payload else f"unrecognised intent {raw!r}"
+            )
+            logger.warning(
+                "[ASSISTANT_INTENT_FALLBACK] conversation=%s reason=%s",
+                conversation.conversation_id,
+                reason,
+            )
+            _note_soft_failure(state, "intent", reason)
             state["intent"] = (
                 IntentType.FOLLOW_UP
                 if conversation.asked_questions
@@ -164,7 +196,17 @@ class AssistantNodes:
         )
         raw_entities = payload.get("entities")
         if not isinstance(raw_entities, list):
-            state["degraded"] = True
+            # Entities enrich the answer; the answer stage reads the transcript
+            # directly, so losing them must not degrade a real model reply.
+            reason = (
+                self._llm_error() if not payload else "response had no entities list"
+            )
+            logger.warning(
+                "[ASSISTANT_ENTITY_FALLBACK] conversation=%s reason=%s",
+                conversation.conversation_id,
+                reason,
+            )
+            _note_soft_failure(state, "entities", reason)
             return state
 
         kept: list[MedicalEntity] = []
@@ -241,7 +283,51 @@ class AssistantNodes:
         )
 
         if not payload:
+            # Recovery attempt before degrading. The full prompt is large (a
+            # transcript, known symptoms, asked questions and up to four
+            # retrieved passages) and a 2200-token budget; the most common
+            # non-credential failure is the model overrunning that budget and
+            # returning truncated, unparseable JSON. A smaller, context-free
+            # retry usually succeeds, and a real answer beats an apology.
+            logger.warning(
+                "[ASSISTANT_ANSWER_EMPTY] conversation=%s reason=%s — retrying "
+                "with a reduced prompt",
+                conversation.conversation_id,
+                self._llm_error(),
+            )
+            payload = await self._llm.complete_json(
+                system_prompt=system_prompt,
+                user_content=prompts.build_answer_user_content(
+                    transcript="",
+                    known_symptoms=conversation.known_symptoms,
+                    asked_questions=[],
+                    retrieved_context="",
+                    latest_message=state["user_text"],
+                ),
+                max_tokens=1200,
+                temperature=0.3,
+            )
+            if payload:
+                logger.info(
+                    "[ASSISTANT_ANSWER_RECOVERED] conversation=%s reduced prompt "
+                    "succeeded",
+                    conversation.conversation_id,
+                )
+                _note_soft_failure(state, "answer", "recovered on reduced prompt")
+                state["answer"] = self._build_answer(state, payload, [])
+                return state
+
+            # Every recovery path is exhausted: no credential worked, no model
+            # worked, and the reduced prompt also failed.
             state["degraded"] = True
+            logger.error(
+                "[ASSISTANT_DEGRADED] conversation=%s the model produced no answer "
+                "after a full and a reduced attempt. Provider reason: %s. "
+                "Soft failures: %s",
+                conversation.conversation_id,
+                self._llm_error(),
+                state.get("soft_failures") or "none",
+            )
             state["answer"] = self._fallback_answer(state)
             return state
 

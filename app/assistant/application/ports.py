@@ -50,7 +50,19 @@ class AssistantLLMPort(Protocol):
         """Return plain text, or `""` when unavailable. Must not raise."""
         ...
 
-    async def health(self) -> dict[str, Any]: ...
+    async def health(self, *, probe: bool = False) -> dict[str, Any]:
+        """
+        Report provider readiness.
+
+        `probe=True` requests a real model call, which is the only way to detect
+        a credential that is present but rejected.
+        """
+        ...
+
+    @property
+    def last_error(self) -> str | None:
+        """Why the most recent call returned nothing, or None on success."""
+        ...
 
 
 @runtime_checkable

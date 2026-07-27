@@ -96,7 +96,7 @@ class TestJsonParsing:
 
 class TestTierFallback:
     async def test_falls_back_to_next_model_on_error(self):
-        adapter, stub = _adapter([RuntimeError("rate limited"), '{"ok": true}'])
+        adapter, stub = _adapter([RuntimeError("bad request"), '{"ok": true}'])
         result = await adapter.complete_json(system_prompt="s", user_content="u")
 
         assert result == {"ok": True}
@@ -108,18 +108,49 @@ class TestTierFallback:
         The port contract forbids raising: every workflow node treats `{}` as
         'model unavailable' and falls back deterministically.
         """
-        adapter, stub = _adapter(
-            [RuntimeError("down"), RuntimeError("down"), RuntimeError("down")]
-        )
+        outcomes = [RuntimeError("down")] * len(_adapter([])[0]._config.models)
+        adapter, stub = _adapter(outcomes)
         result = await adapter.complete_json(system_prompt="s", user_content="u")
 
         assert result == {}
-        assert len(stub.models_tried) == 3
+        assert set(stub.models_tried) == set(adapter._config.models)
 
     async def test_first_tier_success_does_not_retry(self):
         adapter, stub = _adapter(['{"ok": true}'])
         await adapter.complete_json(system_prompt="s", user_content="u")
         assert len(stub.models_tried) == 1
+
+    async def test_no_configured_model_is_decommissioned(self):
+        """
+        Regression guard for the assistant's degraded-mode outage.
+
+        `llama3-70b-8192` sat in the fallback chain long after Groq
+        decommissioned it, so the last tier answered 400 every single time.
+        Nothing in the chain may be a known-dead model.
+        """
+        from app.core.ai_provider import get_ai_provider_config
+
+        decommissioned = {
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "gemma-7b-it",
+            "gemma2-9b-it",
+            "mixtral-8x7b-32768",
+            "llama-3.1-70b-versatile",
+        }
+        assert not decommissioned & set(get_ai_provider_config().models)
+
+    async def test_transient_failure_retries_the_same_model(self):
+        """
+        A 429 or timeout is worth retrying on the same model; only a hard
+        failure should cost a tier. Previously any error burned a tier, so three
+        rate limits exhausted the whole chain and the caller degraded.
+        """
+        adapter, stub = _adapter([RuntimeError("rate limit exceeded"), '{"ok": true}'])
+        result = await adapter.complete_json(system_prompt="s", user_content="u")
+
+        assert result == {"ok": True}
+        assert stub.models_tried == [adapter._config.models[0]] * 2
 
 
 class TestConfiguration:
@@ -164,6 +195,54 @@ class TestConfiguration:
         assert GroqJSONAdapter()._config.fingerprint == central
         assert AssistantGroqAdapter()._config.fingerprint == central
         assert get_groq_api_key() == get_ai_provider_config().api_key
+
+    async def test_rotates_to_next_credential_when_key_is_rejected(self):
+        """
+        The production failure: a *revoked* key resolved ahead of a valid one.
+
+        Resolution used to stop at the first non-empty key, so a stale
+        credential took every AI feature down while a working key sat unused in
+        another source. An auth failure must now advance to the next candidate
+        and retry the same model.
+        """
+        adapter, stub = _adapter(
+            [RuntimeError("Invalid API Key"), '{"ok": true}']
+        )
+        adapter._candidates = [("stale source", "dead-key"), ("good source", "live-key")]
+        adapter._candidate_index = 0
+        # Keep the stub in place across rotation; only the credential changes.
+        adapter._open_client = lambda: True
+
+        result = await adapter.complete_json(system_prompt="s", user_content="u")
+
+        assert result == {"ok": True}
+        assert adapter._candidate_index == 1
+        assert len(stub.models_tried) == 2
+
+    async def test_reports_error_when_every_credential_is_rejected(self):
+        adapter, stub = _adapter([RuntimeError("Invalid API Key")])
+        adapter._candidates = [("only source", "dead-key")]
+        adapter._candidate_index = 0
+
+        result = await adapter.complete_json(system_prompt="s", user_content="u")
+
+        assert result == {}
+        # Auth failures must not be retried across models: the key is wrong, not
+        # the model, so one attempt is all it should cost.
+        assert len(stub.models_tried) == 1
+        assert "credential" in (adapter.last_error or "")
+
+    async def test_health_probe_detects_a_rejected_key(self):
+        """Config-level health passes with a revoked key; the probe must not."""
+        adapter, _ = _adapter([RuntimeError("Invalid API Key")])
+        adapter._candidates = [("only source", "dead-key")]
+        adapter._candidate_index = 0
+
+        assert (await adapter.health())["status"] == "healthy"
+
+        probed = await adapter.health(probe=True)
+        assert probed["status"] == "unhealthy"
+        assert probed["probe"] == "failed"
 
     async def test_health_reports_healthy_when_configured(self):
         adapter, _ = _adapter([])

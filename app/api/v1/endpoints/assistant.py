@@ -125,13 +125,26 @@ async def delete_conversation(
     summary="AI assistant dependency health",
 )
 async def assistant_health(
+    probe: bool = Query(
+        False,
+        description=(
+            "Make a real model call to verify the credential actually works. "
+            "Without it, a revoked API key still reports healthy."
+        ),
+    ),
     llm: AssistantLLMPort = Depends(get_assistant_llm),
     retriever: KnowledgeRetrievalPort = Depends(get_retriever),
     _=Depends(get_current_active_user),
 ) -> Any:
-    """Reports model reachability and the isolated environment's state."""
+    """
+    Reports model reachability and the isolated environment's state.
+
+    Pass `?probe=true` when diagnosing degraded replies: configuration-level
+    checks pass with a revoked key, so only a live call distinguishes
+    "misconfigured" from "credential rejected".
+    """
     settings = get_assistant_settings()
-    llm_health = await llm.health()
+    llm_health = await llm.health(probe=probe)
     healthy = llm_health.get("status") == "healthy"
 
     return AssistantHealthResponse(

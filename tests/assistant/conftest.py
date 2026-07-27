@@ -125,8 +125,12 @@ class ScriptedLLM:
             raise value
         return str(value)
 
-    async def health(self) -> dict[str, Any]:
-        return {"status": "healthy", "provider": "scripted"}
+    async def health(self, *, probe: bool = False) -> dict[str, Any]:
+        return {"status": "healthy", "provider": "scripted", "probe": probe}
+
+    @property
+    def last_error(self) -> str | None:
+        return None
 
 
 class DeadLLM:
@@ -138,8 +142,12 @@ class DeadLLM:
     async def complete_text(self, **_: Any) -> str:
         return ""
 
-    async def health(self) -> dict[str, Any]:
+    async def health(self, *, probe: bool = False) -> dict[str, Any]:
         return {"status": "unhealthy", "provider": "dead", "error": "unreachable"}
+
+    @property
+    def last_error(self) -> str | None:
+        return "simulated provider outage"
 
 
 class FakeRetriever:
