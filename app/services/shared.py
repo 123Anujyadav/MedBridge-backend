@@ -115,6 +115,40 @@ class SharedService:
             "size_bytes": len(content),
         }
 
+    def delete_stored_file(self, file_url: str) -> bool:
+        """
+        Remove a file previously written by `save_uploaded_file`.
+
+        Only ever deletes inside `uploads/`, and only a bare filename taken from
+        the stored URL — so a crafted `file_url` in the database cannot be turned
+        into an arbitrary unlink. Returns False when there was nothing to remove;
+        a missing file is not an error worth failing a delete request over.
+        """
+        if not file_url:
+            return False
+
+        upload_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+        )
+        # basename strips any traversal segments before they reach the join.
+        target = os.path.abspath(
+            os.path.join(upload_dir, os.path.basename(file_url))
+        )
+        if not target.startswith(upload_dir + os.sep):
+            logger.error(f"Refusing to delete outside uploads/: {file_url}")
+            return False
+
+        try:
+            os.remove(target)
+            logger.info(f"Deleted stored file: {target}")
+            return True
+        except FileNotFoundError:
+            logger.warning(f"Stored file already absent: {target}")
+            return False
+        except OSError:
+            logger.exception(f"Could not delete stored file: {target}")
+            return False
+
     async def search_entities(self, db: AsyncSession, q: str) -> List[SearchResult]:
         """
         Runs unified search queries across Doctor specialties and Hospital locations.

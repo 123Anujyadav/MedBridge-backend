@@ -58,11 +58,26 @@ class SendMessageResponse(BaseModel):
         description="True when the answer was produced without a working model call.",
     )
 
+    ai_confidence: int | None = Field(
+        default=None,
+        description=(
+            "The model's self-reported confidence for this turn, 0-100. Null when "
+            "the turn was not scored (a deterministic emergency reply or a "
+            "degraded answer), so the UI can show nothing rather than a number."
+        ),
+    )
+
     @classmethod
     def build(
         cls, conversation: Conversation, message: ChatMessage
     ) -> SendMessageResponse:
         answer = message.answer
+        # Exposed because the panel's confidence card had no value to render and
+        # displayed a hardcoded 94% whenever any symptom was detected.
+        confidence: int | None = None
+        if answer and not answer.degraded and answer.confidence > 0:
+            confidence = round(min(1.0, max(0.0, answer.confidence)) * 100)
+
         return cls(
             conversation_id=conversation.conversation_id,
             title=conversation.title,
@@ -84,6 +99,7 @@ class SendMessageResponse(BaseModel):
             medical_references=list(conversation.references),
             emergency_risk=conversation.emergency_risk.value,
             degraded=bool(answer.degraded) if answer else False,
+            ai_confidence=confidence,
         )
 
 

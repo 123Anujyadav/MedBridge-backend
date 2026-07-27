@@ -12,6 +12,39 @@ class AppointmentCreateRequest(BaseModel):
     type: str = Field(default="in_person", pattern="^(in_person|video|phone|ai_triage)$")
     reason: str = Field(min_length=1, max_length=255)
 
+class BookableDoctorResponse(BaseModel):
+    """
+    A verified clinician a patient may book.
+
+    Deliberately narrow: the booking form needs an id, a name, a specialty, a
+    hospital and a fee. License numbers, contact details and case counts are not
+    a patient's to read, so they are not exposed here.
+    """
+
+    id: uuid.UUID
+    name: str
+    specialty: str
+    hospital_name: Optional[str] = None
+    consultation_fee: float = 0.0
+    rating: float = 0.0
+    years_of_experience: int = 0
+    availability: str = "available"
+    avatar_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class AppointmentRescheduleRequest(BaseModel):
+    """
+    New slot for an existing appointment.
+
+    Same field patterns as `AppointmentCreateRequest` so a date or time that
+    booking would reject cannot enter through the reschedule path instead.
+    """
+
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")  # YYYY-MM-DD
+    time: str = Field(pattern=r"^\d{2}:\d{2}$")        # HH:MM
+
 class AppointmentResponse(BaseModel):
     id: uuid.UUID
     patient_id: uuid.UUID
