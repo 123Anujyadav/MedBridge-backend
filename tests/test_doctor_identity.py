@@ -64,6 +64,10 @@ async def estate(db):
             id=ids[email], first_name="Test", last_name="Clinician",
             phone="+10000000000", specialty="Cardiology",
             license_number=licence, verification_status="verified",
+            # Stated explicitly because a Doctor ID is issued by an
+            # administrator's approval and by nothing else. These clinicians are
+            # already approved, so they hold one; a pending clinician would not.
+            doctor_code=generate_doctor_code(),
         ))
     await db.commit()
     return ids
@@ -118,11 +122,37 @@ class TestDoctorCodeGeneration:
         assert not is_valid_doctor_code("DR8A9XQ23")  # nine
         assert not is_valid_doctor_code("DR8A-9XQ")   # punctuation
 
-    async def test_every_new_doctor_row_is_issued_one(self, db, estate):
-        codes = list((await db.execute(select(Doctor.doctor_code))).scalars())
-        assert len(codes) == 2
+    async def test_a_new_doctor_row_holds_no_id_until_approval(self, db, estate):
+        """
+        The workflow is signup → pending → approval → Doctor ID issued.
+
+        A clinician who has not been approved must have no ID at all: there is
+        nothing to leak and nothing to sign in with. The IDs in this fixture
+        exist only because it approves its doctors explicitly.
+        """
+        user = User(email="fresh.doctor@aronofy.com",
+                    hashed_password=get_password_hash(PW),
+                    role="doctor", is_active=True, is_verified=True)
+        db.add(user)
+        await db.flush()
+        db.add(Doctor(
+            id=user.id, first_name="Fresh", last_name="Signup",
+            phone="+10000000001", specialty="Cardiology",
+            license_number="LIC-FRESH-1", verification_status="pending",
+        ))
+        await db.flush()
+
+        issued = await db.scalar(
+            select(Doctor.doctor_code).where(Doctor.id == user.id)
+        )
+        assert issued is None, "a pending clinician was issued a Doctor ID"
+
+    async def test_approved_doctors_hold_unique_valid_ids(self, db, estate):
+        codes = [c for c in
+                 (await db.execute(select(Doctor.doctor_code))).scalars()
+                 if c is not None]
         assert all(is_valid_doctor_code(c) for c in codes)
-        assert len(set(codes)) == 2
+        assert len(set(codes)) == len(codes)
 
 
 # ── sign-in ──────────────────────────────────────────────────────────────

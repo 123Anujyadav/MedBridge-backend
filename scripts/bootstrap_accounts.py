@@ -21,9 +21,13 @@ Three things happen, in this order:
 2. **The designated administrator is created**, if absent.
 
 3. **The designated clinician is created**, if absent — `pending`, never
-   approved. A doctor account must not become usable without an administrator
-   deciding so, and this script is not an administrator. Their Doctor ID is
-   allocated at creation so it exists to be handed over once approved.
+   approved and holding **no Doctor ID**. A doctor account must not become
+   usable without an administrator deciding so, and this script is not an
+   administrator. The Doctor ID is issued by the approval itself.
+
+An address that already exists under another role is *promoted in place*
+rather than deleted and recreated, so its id — and every audit-log row, case
+and appointment referencing it — survives.
 
 Under `AUTH_PROVIDER=supabase` the identity is created at the provider with its
 address pre-confirmed, since a bootstrap account has no one to click a link in
@@ -45,22 +49,27 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
-from app.core.doctor_code import allocate_doctor_code, is_valid_doctor_code
 from app.core.security import get_password_hash
 import app.db.base  # noqa: F401  — registers every model so relationships resolve
 from app.models.doctor import Doctor
 from app.models.user import User
-from app.services.admin_accounts import MAX_ADMIN_ACCOUNTS, count_admin_accounts
+from app.services.admin_accounts import (
+    MAX_ADMIN_ACCOUNTS,
+    assert_admin_slot_available,
+    count_admin_accounts,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("bootstrap")
 
 
-DEFAULT_ADMIN_EMAIL = "anujkum0989@gmail.com"
-DEFAULT_ADMIN_PASSWORD = "admin123"
+DEFAULT_ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "anujkum0989@gmail.com")
+DEFAULT_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "admin123")
 
-DEFAULT_DOCTOR_EMAIL = "anujkumaryadav0989@gmail.com"
-DEFAULT_DOCTOR_PASSWORD = "doctor123"
+DEFAULT_DOCTOR_EMAIL = os.getenv(
+    "BOOTSTRAP_DOCTOR_EMAIL", "9473sandhyadevi@gmail.com"
+)
+DEFAULT_DOCTOR_PASSWORD = os.getenv("BOOTSTRAP_DOCTOR_PASSWORD", "doctor123")
 
 ADMINS_TO_KEEP = (DEFAULT_ADMIN_EMAIL, "admin@aronofy.com")
 """
@@ -72,40 +81,58 @@ predictable rather than dependent on what happens to be oldest.
 """
 
 
-# ── identity provider ────────────────────────────────────────────────────
-
-async def _ensure_identity(email: str, password: str, role: str) -> str | None:
+async def _sync_identity(db, user: User, password: str) -> None:
     """
-    Make sure Supabase holds a confirmed identity for this address.
+    Make the account's Supabase identity real, confirmed, and correctly linked.
 
-    Returns its id, or None when the built-in provider is active. An address
-    that already has an identity has its password reset to the designated one,
-    so a half-finished earlier run cannot leave an account nobody can sign in to.
+    An account can arrive here in three states, and all three occur in the
+    production database this script is written for:
+
+    * no `supabase_user_id` at all — never signed in through the provider;
+    * an id that the provider does not recognise, left behind by a project
+      migration or a restored database. The local row then points at nothing,
+      and sign-in fails with a confusing "incorrect password";
+    * already correct, in which case only the password is reset.
+
+    In each case the address is looked up at the provider, created if absent,
+    and the local link rewritten to whatever the provider actually holds. That
+    is what "Supabase and PostgreSQL stay synchronized" has to mean in
+    practice — not that they were synchronized once, but that a re-run repairs
+    them if they have drifted.
     """
     if settings.AUTH_PROVIDER != "supabase":
-        return None
+        return
 
     from app.core.supabase import SupabaseAuthError, get_supabase_auth_client
 
     client = get_supabase_auth_client()
-    existing = await client.admin_get_user_by_email(email)
+    existing = await client.admin_get_user_by_email(user.email)
+
     if existing and existing.get("id"):
+        identity_id = existing["id"]
         try:
             await client.admin_update_user(
-                existing["id"], password=password, email_confirm=True
+                identity_id, password=password, email_confirm=True
             )
-            logger.info("  supabase identity already present, password reset")
         except SupabaseAuthError as exc:
-            logger.warning("  could not update supabase identity: %s", exc.message)
-        return existing["id"]
+            logger.warning("  could not reset provider password: %s", exc.message)
+    else:
+        created = await client.admin_create_user(
+            email=user.email, password=password,
+            email_confirm=True,  # no mailbox is watching a bootstrap account
+            user_metadata={"role": user.role, "bootstrap": True},
+        )
+        identity_id = created.get("id")
+        logger.info("  created the Supabase identity")
 
-    created = await client.admin_create_user(
-        email=email, password=password,
-        email_confirm=True,  # no mailbox is watching a bootstrap account
-        user_metadata={"role": role, "bootstrap": True},
-    )
-    logger.info("  supabase identity created")
-    return created.get("id")
+    if identity_id and user.supabase_user_id != identity_id:
+        if user.supabase_user_id:
+            logger.info(
+                "  relinked a stale supabase_user_id (%s -> %s)",
+                user.supabase_user_id, identity_id,
+            )
+        user.supabase_user_id = identity_id
+        await db.flush()
 
 
 # ── step 1: bring the administrator count under the cap ──────────────────
@@ -142,17 +169,27 @@ async def retire_surplus_admins(db, dry_run: bool) -> int:
 # ── step 2: the designated administrator ─────────────────────────────────
 
 async def ensure_default_admin(db, dry_run: bool) -> User | None:
-    """Create the designated administrator, unless the address already exists."""
+    """
+    Install the designated administrator.
+
+    Creates the account if the address is new, and *promotes it in place* if the
+    address already exists under another role. Promoting rather than deleting
+    and recreating is what keeps the account's id stable, and every audit-log
+    row, case and appointment that references it intact.
+    """
     logger.info("Step 2: administrator %s", DEFAULT_ADMIN_EMAIL)
 
-    existing = await db.scalar(
-        select(User).where(User.email == DEFAULT_ADMIN_EMAIL)
-    )
-    if existing:
-        logger.info("  already exists (role=%s, active=%s) — left untouched",
-                    existing.role, existing.is_active)
-        return existing
+    user = await db.scalar(select(User).where(User.email == DEFAULT_ADMIN_EMAIL))
 
+    if user is not None and user.role == "admin" and user.is_active:
+        logger.info("  already an active administrator")
+        if not dry_run:
+            await _sync_identity(db, user, DEFAULT_ADMIN_PASSWORD)
+        return user
+
+    # Creating *or* promoting consumes a slot, so both are capped. The check
+    # takes the same advisory lock the database trigger uses, so a concurrent
+    # run cannot slip a third administrator past it.
     in_use = await count_admin_accounts(db)
     if in_use >= MAX_ADMIN_ACCOUNTS:
         logger.error(
@@ -162,23 +199,33 @@ async def ensure_default_admin(db, dry_run: bool) -> User | None:
         return None
 
     if dry_run:
-        logger.info("  would create (slot %d of %d)", in_use + 1, MAX_ADMIN_ACCOUNTS)
+        action = "promote" if user is not None else "create"
+        logger.info("  would %s (slot %d of %d)", action, in_use + 1,
+                    MAX_ADMIN_ACCOUNTS)
         return None
 
-    supabase_user_id = await _ensure_identity(
-        DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD, "admin"
-    )
-    user = User(
-        email=DEFAULT_ADMIN_EMAIL,
-        hashed_password=get_password_hash(DEFAULT_ADMIN_PASSWORD),
-        role="admin",
-        is_active=True,
-        is_verified=True,
-        supabase_user_id=supabase_user_id,
-    )
-    db.add(user)
-    await db.flush()
-    logger.info("  created (slot %d of %d)", in_use + 1, MAX_ADMIN_ACCOUNTS)
+    await assert_admin_slot_available(db)
+
+    if user is None:
+        user = User(
+            email=DEFAULT_ADMIN_EMAIL,
+            hashed_password=get_password_hash(DEFAULT_ADMIN_PASSWORD),
+            role="admin", is_active=True, is_verified=True,
+        )
+        db.add(user)
+        await db.flush()
+        logger.info("  created (slot %d of %d)", in_use + 1, MAX_ADMIN_ACCOUNTS)
+    else:
+        previous = user.role
+        user.role = "admin"
+        user.is_active = True
+        user.is_verified = True
+        user.hashed_password = get_password_hash(DEFAULT_ADMIN_PASSWORD)
+        await db.flush()
+        logger.info("  promoted %s -> admin (slot %d of %d)",
+                    previous, in_use + 1, MAX_ADMIN_ACCOUNTS)
+
+    await _sync_identity(db, user, DEFAULT_ADMIN_PASSWORD)
     return user
 
 
@@ -194,46 +241,51 @@ async def ensure_default_doctor(db, dry_run: bool) -> Doctor | None:
     """
     logger.info("Step 3: clinician %s", DEFAULT_DOCTOR_EMAIL)
 
-    existing = await db.scalar(
-        select(User).where(User.email == DEFAULT_DOCTOR_EMAIL)
-    )
-    if existing:
-        doctor = await db.get(Doctor, existing.id)
-        if doctor and not is_valid_doctor_code(doctor.doctor_code):
-            if dry_run:
-                logger.info("  exists without a Doctor ID — would allocate one")
-            else:
-                doctor.doctor_code = await allocate_doctor_code(db)
-                await db.flush()
-                logger.info("  allocated missing Doctor ID: %s", doctor.doctor_code)
-        elif doctor:
-            logger.info("  already exists — Doctor ID %s, status %s",
-                        doctor.doctor_code, doctor.verification_status)
+    user = await db.scalar(select(User).where(User.email == DEFAULT_DOCTOR_EMAIL))
+    doctor = await db.get(Doctor, user.id) if user else None
+
+    if doctor is not None:
+        logger.info("  clinical profile already present — status %s, Doctor ID %s",
+                    doctor.verification_status, doctor.doctor_code or "not issued")
+        if not dry_run:
+            if user.role != "doctor":
+                logger.info("  promoted %s -> doctor", user.role)
+                user.role = "doctor"
+            user.is_active = True
+            user.hashed_password = get_password_hash(DEFAULT_DOCTOR_PASSWORD)
+            await db.flush()
+            await _sync_identity(db, user, DEFAULT_DOCTOR_PASSWORD)
         return doctor
 
     if dry_run:
-        logger.info("  would create (pending approval)")
+        what = "promote and add a clinical profile" if user else "create"
+        logger.info("  would %s (pending approval, no Doctor ID)", what)
         return None
 
-    supabase_user_id = await _ensure_identity(
-        DEFAULT_DOCTOR_EMAIL, DEFAULT_DOCTOR_PASSWORD, "doctor"
-    )
-    user = User(
-        email=DEFAULT_DOCTOR_EMAIL,
-        hashed_password=get_password_hash(DEFAULT_DOCTOR_PASSWORD),
-        role="doctor",
-        is_active=True,
-        is_verified=True,
-        supabase_user_id=supabase_user_id,
-    )
-    db.add(user)
-    await db.flush()
+    if user is None:
+        user = User(
+            email=DEFAULT_DOCTOR_EMAIL,
+            hashed_password=get_password_hash(DEFAULT_DOCTOR_PASSWORD),
+            role="doctor", is_active=True, is_verified=True,
+        )
+        db.add(user)
+        await db.flush()
+        logger.info("  created the account")
+    else:
+        previous = user.role
+        user.role = "doctor"
+        user.is_active = True
+        user.is_verified = True
+        user.hashed_password = get_password_hash(DEFAULT_DOCTOR_PASSWORD)
+        await db.flush()
+        logger.info("  promoted %s -> doctor", previous)
 
     doctor = Doctor(
         id=user.id,
-        doctor_code=await allocate_doctor_code(db),
-        first_name="Anuj Kumar",
-        last_name="Yadav",
+        # No Doctor ID. It is issued by an administrator's approval and by
+        # nothing else, so a clinician awaiting review has none to sign in with.
+        first_name="Sandhya",
+        last_name="Devi",
         phone="+91 90000 00000",
         specialty="General Medicine",
         sub_specialties=["Internal Medicine"],
@@ -250,9 +302,9 @@ async def ensure_default_doctor(db, dry_run: bool) -> Doctor | None:
     )
     db.add(doctor)
     await db.flush()
+    await _sync_identity(db, user, DEFAULT_DOCTOR_PASSWORD)
 
-    logger.info("  created — Doctor ID %s, status pending", doctor.doctor_code)
-    logger.info("  an administrator must approve this account before it can sign in")
+    logger.info("  created — status pending, no Doctor ID until approved")
     return doctor
 
 

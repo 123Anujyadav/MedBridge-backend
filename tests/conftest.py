@@ -179,19 +179,33 @@ async def login_payload(email: str, password: str = "password123") -> dict:
     from app.models.doctor import Doctor
     from app.models.user import User
 
+    from app.core.doctor_code import assign_doctor_code
+
     payload = {"email": email, "password": password}
-    lookup = (
-        select(Doctor.doctor_code)
-        .join(User, User.id == Doctor.id)
-        .where(User.email == email)
+    lookup = select(Doctor).join(User, User.id == Doctor.id).where(
+        User.email == email
     )
 
-    if _active_session is not None:
-        doctor_code = await _active_session.scalar(lookup)
-    else:
-        async with TestSessionLocal() as session:
-            doctor_code = await session.scalar(lookup)
+    session = _active_session
+    if session is None:
+        async with TestSessionLocal() as fallback:
+            doctor = await fallback.scalar(lookup)
+            if doctor and doctor.doctor_code:
+                payload["doctor_id"] = doctor.doctor_code
+            return payload
 
-    if doctor_code:
-        payload["doctor_id"] = doctor_code
+    doctor = await session.scalar(lookup)
+    if doctor is None:
+        return payload
+
+    if not doctor.doctor_code:
+        # A Doctor ID is issued by an administrator's approval, and most tests
+        # build their clinicians directly through the model without going
+        # through that route. Standing in for it here keeps those fixtures
+        # honest — an approved clinician always holds an ID in production,
+        # where the database refuses the alternative — without making every
+        # test file re-enact the approval workflow.
+        await assign_doctor_code(session, doctor)
+
+    payload["doctor_id"] = doctor.doctor_code
     return payload

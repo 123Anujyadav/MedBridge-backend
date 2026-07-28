@@ -1,7 +1,6 @@
 import uuid
 from sqlalchemy import CheckConstraint, Float, ForeignKey, Integer, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.doctor_code import generate_doctor_code
 from app.db.base_class import Base
 
 class Doctor(Base):
@@ -25,7 +24,7 @@ class Doctor(Base):
         unique=True,
         index=True,
         nullable=True,
-        default=generate_doctor_code,
+        default=None,
     )
     """
     The clinician's 8-character Doctor ID — the third sign-in factor.
@@ -36,9 +35,15 @@ class Doctor(Base):
     that eventually routes a record to the wrong clinician. It is presented to
     people as "Doctor ID" everywhere in the UI and the API documentation.
 
-    Generated on insert so no doctor row can exist without one. Nullable only
-    because rows written before this column existed have to be backfilled by
-    migration rather than rejected.
+    Null until an administrator approves the account. The workflow is
+    signup → pending → approval → Doctor ID issued, so a clinician who has not
+    been approved has no ID to be told, to leak, or to sign in with. It is
+    allocated exactly once, by `admin_service.verify_doctor`, and never
+    reissued afterwards — a clinician who has been given their ID keeps it
+    through any later unverify/re-approve cycle.
+
+    The database enforces the other half of that rule: a row may not be
+    `verified` while this column is null (`doctor_verified_requires_code`).
     """
 
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)

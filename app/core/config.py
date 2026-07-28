@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any, List, Union
 from pydantic import AnyHttpUrl, BeforeValidator, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,9 +27,45 @@ def parse_cors_origins(v: Any) -> Any:
         return v
     raise ValueError(v)
 
+def _resolve_env_file() -> str:
+    """
+    Which env file this process configures itself from.
+
+    Defaults to `Backend/.env`, so nothing about local development changes.
+    Set `APP_ENV_FILE` to point at another one — `APP_ENV_FILE=../.prod.env`
+    runs migrations, scripts and the server against the production Railway
+    database without editing, copying or overriding any file.
+
+    The name is resolved relative to the current directory first and then to the
+    repository root, because these processes are started from both places
+    (`alembic` from `Backend/`, deployment tooling from the root) and a config
+    file that silently fails to load is far worse than one that cannot be found:
+    the first produces a process quietly pointed at the wrong database.
+    """
+    name = os.getenv("APP_ENV_FILE", ".env")
+
+    candidate = Path(name)
+    if candidate.is_file():
+        return str(candidate.resolve())
+
+    # `app/core/config.py` -> `app/core` -> `app` -> `Backend` -> repo root
+    for base in (Path(__file__).resolve().parents[2],
+                 Path(__file__).resolve().parents[3]):
+        candidate = base / name
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    if os.getenv("APP_ENV_FILE"):
+        raise RuntimeError(
+            f"APP_ENV_FILE is set to '{name}' but no such file was found. "
+            "Refusing to start against an unknown configuration."
+        )
+    return name
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_resolve_env_file(),
         env_ignore_empty=True,
         extra="ignore"
     )
@@ -124,6 +162,31 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: Annotated[
         List[str], BeforeValidator(parse_cors_origins)
     ] = []
+
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def _require_async_driver(cls, v: str) -> str:
+        """
+        Normalise a managed provider's connection string to the asyncpg driver.
+
+        Railway, Heroku and most managed PostgreSQL services hand out URLs in
+        the `postgresql://` (or legacy `postgres://`) form, which SQLAlchemy
+        resolves to psycopg2 — a driver this application does not install and
+        cannot use, because the engine is created with `create_async_engine`.
+        The result is a `ModuleNotFoundError: psycopg2` at import time, before
+        any request is served.
+
+        Rewriting the scheme here means the provider's URL can be used exactly
+        as issued. Nothing has to be hand-edited into the environment file, so
+        there is no second copy of a production credential to keep in step, and
+        a URL that already names a driver is left untouched.
+        """
+        if not v:
+            return v
+        for prefix in ("postgresql://", "postgres://"):
+            if v.startswith(prefix):
+                return "postgresql+asyncpg://" + v[len(prefix):]
+        return v
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

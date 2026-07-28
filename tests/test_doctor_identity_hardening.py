@@ -52,6 +52,8 @@ async def estate(db):
         id=ids[DOCTOR], first_name="Hard", last_name="Ening",
         phone="+10000000000", specialty="Cardiology",
         license_number="LIC-HARD-1", verification_status="verified",
+        # An approved clinician holds a Doctor ID; approval is what issues it.
+        doctor_code=generate_doctor_code(),
     ))
     await db.commit()
     return ids
