@@ -12,7 +12,7 @@ from app.core.exceptions import (
 from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.hospital import Hospital
-from app.models.emergency import EmergencyRequest
+from app.models.emergency import ACTIVE_SOS_STATUSES, EmergencyRequest
 from app.repositories.user import user_repository
 from app.repositories.doctor import doctor_repository
 from app.repositories.hospital import hospital_repository
@@ -31,7 +31,11 @@ class AdminService:
         
         active_emergencies = await db.scalar(
             select(func.count(EmergencyRequest.id))
-            .where(EmergencyRequest.status.in_(["active", "dispatched", "arrived"]))
+            # Shared with the SOS workflow so the tile and the emergency list
+            # cannot disagree about what "active" means. The legacy statuses
+            # are included in that constant, so rows written before Phase 2
+            # still count.
+            .where(EmergencyRequest.status.in_(ACTIVE_SOS_STATUSES))
         )
 
         # Breakdowns the dashboard renders. All real counts.
@@ -88,7 +92,7 @@ class AdminService:
         total_emergencies = await db.scalar(select(func.count(EmergencyRequest.id))) or 0
         completed_emergencies = await db.scalar(
             select(func.count(EmergencyRequest.id))
-            .where(EmergencyRequest.status == "completed")
+            .where(EmergencyRequest.status.in_(["completed", "resolved"]))
         ) or 0
 
         success_ratio = 100.0

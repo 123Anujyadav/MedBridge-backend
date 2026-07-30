@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
-    auth, patient, doctor, admin, shared, websocket, health, ai, intake, assistant,
+    auth, patient, doctor, admin, shared, websocket, health, ai, intake,
+    assistant, webhooks,
 )
 
 api_router = APIRouter()
@@ -32,6 +33,10 @@ api_router.include_router(
 )
 api_router.include_router(health.router, tags=["Health & Monitoring"])
 api_router.include_router(websocket.router, tags=["WebSockets"])
+# Provider callbacks. Public, signature-verified — see the module docstring.
+api_router.include_router(
+    webhooks.router, prefix="/webhooks", tags=["Provider Callbacks"]
+)
 
 
 

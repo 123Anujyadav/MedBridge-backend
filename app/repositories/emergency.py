@@ -2,7 +2,7 @@ import uuid
 from typing import Optional
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.emergency import EmergencyRequest
+from app.models.emergency import ACTIVE_SOS_STATUSES, EmergencyRequest
 from app.repositories.base import BaseRepository
 from pydantic import BaseModel
 
@@ -18,7 +18,7 @@ class EmergencyRequestRepository(BaseRepository[EmergencyRequest, BaseModel, Bas
             .where(
                 and_(
                     EmergencyRequest.patient_id == patient_id,
-                    EmergencyRequest.status.in_(["active", "dispatched", "arrived"])
+                    EmergencyRequest.status.in_(ACTIVE_SOS_STATUSES)
                 )
             )
             .order_by(EmergencyRequest.created_at.desc())

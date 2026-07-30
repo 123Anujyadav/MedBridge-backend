@@ -66,6 +66,7 @@ celery_app.conf.update(
         "app.worker.tasks.dispatch",
         "app.worker.tasks.jobs",
         "app.worker.tasks.reminder",
+        "app.worker.tasks.emergency_comms",
     ],
     # Periodic schedule. There was none before, which is why the reminder task
     # that already existed had never actually run.
@@ -81,6 +82,13 @@ celery_app.conf.update(
         "medicine-reminders": {
             "task": "app.worker.tasks.reminder.send_medicine_reminders",
             "schedule": crontab(hour=8, minute=0),  # daily, 08:00 UTC
+        },
+        # Emergency retries are swept far more often than anything else here:
+        # a queued alert that waits an hour is an alert nobody received. The
+        # sweep is a no-op when there is nothing due.
+        "emergency-communication-retries": {
+            "task": "app.worker.tasks.emergency_comms.sweep_emergency_communications",
+            "schedule": 30.0,
         },
         "system-health-sweep": {
             "task": "app.worker.tasks.reminder.check_system_health",

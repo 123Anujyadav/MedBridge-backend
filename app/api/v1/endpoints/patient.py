@@ -14,6 +14,20 @@ from app.repositories.report import report_repository
 from app.repositories.notification import notification_repository
 from app.schemas.patient import ConsentFlagsSchema, PatientResponse, PatientUpdate
 from app.schemas.shared_api import NotificationResponse
+from app.schemas.emergency_profile import (
+    EmergencyLocationUpdate,
+    EmergencyProfileResponse,
+    EmergencyProfileUpsert,
+)
+from app.schemas.sos import (
+    SOSActiveResponse,
+    SOSCancelRequest,
+    SOSCommunicationsResponse,
+    SOSEmergencyResponse,
+    SOSHospitalResponse,
+    SOSTimelineResponse,
+    SOSTriggerRequest,
+)
 from app.schemas.patient_api import (
     AppointmentCreateRequest,
     AppointmentRescheduleRequest,
@@ -33,6 +47,14 @@ from app.services.patient import patient_service
 from app.services.shared import shared_service
 from app.services.appointment import appointment_service
 from app.services.emergency import emergency_service
+from app.services.emergency_profile import emergency_profile_service
+from app.services.emergency_comms import (
+    emergency_comms_service,
+    spawn_communications,
+)
+from app.services.sos import sos_service
+from app.services.sos_timeline import sos_timeline_service
+from app.services.sos_notifications import get_emergency_notifier
 from app.services.vitals import vitals_service
 from app.repositories.vital_reading import vital_reading_repository
 from app.schemas.vitals_api import (
@@ -411,6 +433,252 @@ async def mark_notification_read(
     await notification_repository.update(db, db_obj=notif, obj_in={"read": True})
     return {"message": "Notification marked as read."}
 
+# ---------------------------------------------------------------------------
+# Emergency Profile — the standing record of who to call, where the patient
+# lives, and where they last were.
+#
+# Registered before `/emergency/{id}` only for readability; the paths do not
+# overlap, since `/emergency-profile` has no slash where that route needs one.
+#
+# Every handler keys off `current_user.id`. None of them accepts a patient
+# identifier, so there is no parameter a caller could change in order to reach
+# somebody else's record.
+# ---------------------------------------------------------------------------
+
+@router.get("/emergency-profile", response_model=Optional[EmergencyProfileResponse])
+async def get_emergency_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Retrieve the caller's emergency profile.
+
+    Returns `null` rather than 404 when none exists yet: a patient who has not
+    filled the form in is the ordinary starting state, and the page renders an
+    empty form for it rather than an error.
+    """
+    return await emergency_profile_service.get_profile(db, current_user.id)
+
+
+@router.put("/emergency-profile", response_model=EmergencyProfileResponse)
+async def save_emergency_profile(
+    payload: EmergencyProfileUpsert,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Create or update the caller's emergency contact and registered address.
+
+    One endpoint for both, because the form has one Save button. Stored
+    coordinates are left alone — editing an address must not silently discard a
+    position the patient has already captured.
+    """
+    return await emergency_profile_service.upsert_profile(
+        db, current_user.id, payload
+    )
+
+
+@router.delete("/emergency-profile", status_code=status.HTTP_200_OK)
+async def delete_emergency_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """Delete the caller's emergency profile in full."""
+    return await emergency_profile_service.delete_profile(db, current_user.id)
+
+
+@router.put("/emergency-profile/location", response_model=EmergencyProfileResponse)
+async def update_emergency_location(
+    payload: EmergencyLocationUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Record coordinates captured from the browser.
+
+    Only latitude and longitude are accepted; the Google Maps link is derived
+    from them on the server, so the stored link can only ever point at the
+    stored position.
+    """
+    return await emergency_profile_service.update_location(
+        db, current_user.id, payload
+    )
+
+
+@router.delete("/emergency-profile/location", response_model=EmergencyProfileResponse)
+async def clear_emergency_location(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Forget the stored coordinates, keeping the contact and address.
+
+    Separate from deleting the profile so a patient can withdraw the most
+    sensitive part of the record without losing the rest of it.
+    """
+    return await emergency_profile_service.clear_location(db, current_user.id)
+
+
+# ---------------------------------------------------------------------------
+# SOS emergency workflow.
+#
+# `/sos/active` is declared before `/sos/{id}` so the literal wins the match.
+# No handler takes a patient identifier: the emergency is always resolved from
+# `current_user.id`, so there is no parameter a caller could change to reach
+# somebody else's.
+#
+# Each write commits before it announces. The `get_db` dependency would
+# otherwise commit *after* the handler returns, so a responder could be alerted
+# to an emergency that a later failure rolled back.
+# ---------------------------------------------------------------------------
+
+@router.post("/sos", response_model=SOSEmergencyResponse,
+             status_code=status.HTTP_201_CREATED)
+async def trigger_sos(
+    payload: SOSTriggerRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Raise an emergency.
+
+    Refuses, with a message the patient can act on, when the emergency profile
+    is incomplete, when no position is available, or when one of their
+    emergencies is already open.
+
+    Telephone calls, SMS and WhatsApp are handed to a background task rather
+    than awaited here. Three calls and six messages are seconds of network I/O
+    against an external vendor; a patient pressing an SOS button must not watch
+    a spinner for them. The emergency is committed and broadcast to the
+    dashboards first, so responders see it before the first handset rings, and
+    the background task works from the durable communication log — nothing is
+    lost if it fails.
+    """
+    response, emergency = await sos_service.trigger(db, current_user.id, payload)
+    await db.commit()
+
+    await get_emergency_notifier().emergency_raised(response)
+
+    spawn_communications(emergency.id)
+    return response
+
+
+@router.get("/sos/active", response_model=SOSActiveResponse)
+async def get_active_sos(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Whether this patient has an emergency open, and which one.
+
+    One request, so the SOS button can render the right state on load without
+    fetching a list and reasoning about it.
+    """
+    from app.services.sos import to_response
+
+    emergency = await sos_service.get_active_for_patient(db, current_user.id)
+    if emergency is None:
+        return {"active": False, "emergency": None}
+
+    patient = await patient_service.get_profile(db, current_user.id)
+    return {"active": True, "emergency": to_response(emergency, patient)}
+
+
+@router.get("/sos", response_model=List[SOSEmergencyResponse])
+async def list_my_sos(
+    active_only: bool = Query(False, description="Only emergencies still running."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """This patient's emergency history, newest first."""
+    return await sos_service.list_for_actor(db, current_user, active_only=active_only)
+
+
+@router.get("/sos/{id}", response_model=SOSEmergencyResponse)
+async def get_my_sos(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """One of this patient's emergencies, with its timeline."""
+    return await sos_service.get_one(db, id, current_user)
+
+
+@router.post("/sos/{id}/cancel", response_model=SOSEmergencyResponse)
+async def cancel_my_sos(
+    id: uuid.UUID,
+    payload: SOSCancelRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Stand down an emergency this patient raised.
+
+    A false alarm should be withdrawable by the person who raised it, without
+    waiting for staff to do it for them.
+    """
+    response, _ = await sos_service.cancel(db, id, current_user, payload.reason)
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response
+
+
+@router.get("/sos/{id}/communications", response_model=SOSCommunicationsResponse)
+async def get_sos_communications(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Every call and message raised for this emergency, with its outcome.
+
+    Reachability is decided by `sos_service` before anything is read, so a
+    patient can only ever see the communication log of their own emergency.
+    Telephone numbers are masked in the response — the full number stays in the
+    record for an incident review, but the API does not hand a third party's
+    number to every screen.
+    """
+    await sos_service.get_one(db, id, current_user)  # authorises, or raises
+    return await emergency_comms_service.summarise(db, id)
+
+
+@router.get("/sos/{id}/timeline", response_model=SOSTimelineResponse)
+async def get_sos_timeline(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    The whole history of an emergency on one axis.
+
+    Status changes and communication attempts are stored in separate tables —
+    one is clinical state, the other is delivery — and merged here in
+    timestamp order, so the patient's screen shows "Doctor assigned" and "SMS
+    sent to your emergency contact" in the order they actually happened.
+    """
+    emergency = await sos_service.get_one(db, id, current_user)
+    return await sos_timeline_service.build(db, id, emergency)
+
+
+@router.get("/sos/{id}/hospital", response_model=SOSHospitalResponse)
+async def get_sos_hospital(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    The nearest facility found for this emergency, if one was.
+
+    Answers with `available: false` and a reason when no Google Maps key is
+    configured or the search returned nothing. It never guesses a hospital or
+    an ETA — an invented address on an emergency screen is somewhere an
+    ambulance gets sent.
+    """
+    await sos_service.get_one(db, id, current_user)
+    return await sos_timeline_service.hospital_summary(db, id)
+
+
 @router.post("/emergency", response_model=EmergencyPanicResponse, status_code=status.HTTP_201_CREATED)
 async def trigger_emergency(
     panic_in: EmergencyPanicRequest,
@@ -418,9 +686,32 @@ async def trigger_emergency(
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
-    Trigger emergency panic route, matching patient to nearest available hospital.
+    Legacy panic route, kept for compatibility and now backed by the SOS service.
+
+    The request and response shapes are unchanged, so existing callers keep
+    working. What changed is that it no longer invents its outcome: the previous
+    implementation set `ambulance_dispatched` true with a hard-coded unit id, a
+    twelve-minute ETA and a hospital name chosen when no hospital had capacity.
+    Telling a patient that help is on its way when nothing has been arranged is
+    the most harmful thing this endpoint could do, so it now records the same
+    honest `pending` state the SOS workflow does, and a responder moves it on.
+
+    New clients should use `POST /patient/sos`.
     """
-    return await emergency_service.trigger_panic(db, current_user.id, panic_in.location)
+    response, emergency = await sos_service.trigger(
+        db, current_user.id,
+        SOSTriggerRequest(latitude=panic_in.location.lat,
+                          longitude=panic_in.location.lng),
+        # This route predates the emergency profile and carries its own
+        # coordinates and address, so it keeps the preconditions it shipped
+        # with. `POST /patient/sos` is the one that requires the profile.
+        require_profile=False,
+        address_override=panic_in.location.address,
+    )
+    await db.commit()
+
+    await get_emergency_notifier().emergency_raised(response)
+    return emergency
 
 @router.get("/emergency/{id}", response_model=EmergencyPanicResponse)
 async def track_emergency(

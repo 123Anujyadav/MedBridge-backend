@@ -1,3 +1,5 @@
+import sys
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,8 +23,31 @@ async def lifespan(app: FastAPI):
     """
     # Startup actions
     redis_manager.init_redis()
+
+    # The emergency-communication retry sweeper.
+    #
+    # Celery runs the same sweep on a beat schedule, but Celery needs a
+    # reachable broker and an emergency alert must not depend on one. Both
+    # claim rows with the same atomic conditional update, so running both is
+    # safe and running either alone is sufficient. Skipped under pytest, where
+    # a background loop would outlive the test that started it.
+    sweeper = None
+    if "pytest" not in sys.modules:
+        import asyncio
+
+        from app.services.emergency_comms import retry_sweep_loop
+
+        sweeper = asyncio.create_task(retry_sweep_loop())
+
     yield
+
     # Shutdown actions
+    if sweeper is not None:
+        sweeper.cancel()
+        try:
+            await sweeper
+        except (asyncio.CancelledError, Exception):
+            pass
     await redis_manager.close()
 
 is_prod = settings.ENVIRONMENT == "production"
@@ -48,13 +73,17 @@ for default_origin in default_dev_origins:
 if is_prod and "*" in cors_origins:
     cors_origins = [o for o in cors_origins if o != "*"]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.state.cors_origins = cors_origins
+"""
+The resolved allow-list, published for the 500 handler.
+
+Starlette treats a handler registered for bare `Exception` specially: it is
+invoked by `ServerErrorMiddleware`, which wraps the *entire* application and
+therefore sits outside CORS. That one response can never pick the headers up on
+its way out, so the handler has to attach them itself — and to do that it needs
+the same list configured here, without importing this module and creating a
+cycle.
+"""
 
 # Apply Hardening, Observability, and Monitoring Middlewares
 app.add_middleware(SecurityHeadersMiddleware)
@@ -63,6 +92,33 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(PrometheusMiddleware)
+
+# CORS is added LAST, which in Starlette makes it the OUTERMOST middleware —
+# `add_middleware` prepends, so the last one added is the first one entered and
+# the last one left.
+#
+# It has to be outermost because it is the only thing that attaches
+# `Access-Control-Allow-Origin`, and a response that never reaches it is a
+# response the browser refuses to hand to the page. Previously CORS was added
+# first and so sat *innermost*: any middleware outside it that answered on its
+# own — most importantly `RateLimitMiddleware` returning 429 — produced a reply
+# with no CORS headers at all. To the browser that is not "rate limited", it is
+# a CORS failure, which surfaces in axios as an opaque "Network Error" with no
+# status code. That is the deployed sign-in failure this ordering fixes.
+#
+# Two consequences worth knowing about:
+#   * Every response now carries the headers, including the ones produced by
+#     the exception handlers (401/403/404/422/500) and by the rate limiter.
+#   * Preflight `OPTIONS` requests are answered by CORS before they reach the
+#     rate limiter, so a preflight no longer consumes part of the caller's
+#     per-minute budget. A sign-in attempt used to cost two.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Register Custom Exception Map Handlers
 register_exception_handlers(app)

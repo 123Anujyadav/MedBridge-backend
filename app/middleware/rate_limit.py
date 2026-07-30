@@ -42,7 +42,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         limit = None
         bucket = normalized_path
         for route_pattern, max_limit in PROTECTED_PATHS.items():
-            if normalized_path == route_pattern or normalized_path.startswith(route_pattern):
+            # Match whole path segments, not bare prefixes. A plain `startswith`
+            # also catches every *sibling* route whose name merely begins the
+            # same way: `/patient/emergency-profile` — editing a stored address
+            # — was being throttled at the panic-button's ten-per-minute
+            # because it starts with `/patient/emergency`. Requiring the next
+            # character to be `/` keeps `/auth/login/doctor` sharing the
+            # `/auth/login` budget, which is deliberate, while leaving
+            # `-profile` alone.
+            if (normalized_path == route_pattern
+                    or normalized_path.startswith(route_pattern + "/")):
                 limit = max_limit
                 # Count against the *pattern*, not the exact path. Otherwise
                 # `/auth/login` and `/auth/login/doctor` keep separate counters

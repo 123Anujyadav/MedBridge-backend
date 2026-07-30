@@ -20,6 +20,11 @@ from app.repositories.patient import patient_repository
 from app.schemas.patient import PatientResponse
 from app.schemas.patient_api import AppointmentResponse, PrescriptionResponse, ReportResponse
 from app.schemas.doctor import DoctorResponse
+from app.schemas.sos import (
+    SOSCancelRequest,
+    SOSEmergencyResponse,
+    SOSStatusUpdateRequest,
+)
 from app.schemas.doctor_api import (
     AIReportDraftRequest,
     AIReportDraftResponse,
@@ -52,6 +57,8 @@ from app.schemas.clinical_review import (
     SaveConsultationResponse,
 )
 from app.services.ai_report import ai_clinical_report_service
+from app.services.sos import sos_service
+from app.services.sos_notifications import get_emergency_notifier
 from app.services.avatar import avatar_service
 from app.services.case_timeline import case_timeline_service
 from app.services.clinical_review import clinical_review_service
@@ -905,3 +912,69 @@ async def update_report_content(
     return report
 
 
+
+
+# ---------------------------------------------------------------------------
+# SOS emergencies.
+#
+# A clinician reaches the emergencies assigned to them plus the unclaimed
+# active queue — that queue is how an emergency reaches somebody who can accept
+# it. Another doctor's assigned emergency is never returned; the scope is built
+# into the query in `sos_service`, so it cannot be forgotten at a call site.
+# ---------------------------------------------------------------------------
+
+@router.get("/emergencies", response_model=List[SOSEmergencyResponse])
+async def list_emergencies(
+    active_only: bool = Query(True, description="Only emergencies still running."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_approved_doctor),
+) -> Any:
+    """Emergencies this clinician is responsible for, plus the unclaimed queue."""
+    return await sos_service.list_for_actor(db, current_user, active_only=active_only)
+
+
+@router.get("/emergencies/{id}", response_model=SOSEmergencyResponse)
+async def get_emergency(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_approved_doctor),
+) -> Any:
+    """One emergency, with its full timeline."""
+    return await sos_service.get_one(db, id, current_user)
+
+
+@router.put("/emergencies/{id}/status", response_model=SOSEmergencyResponse)
+async def update_emergency_status(
+    id: uuid.UUID,
+    payload: SOSStatusUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_approved_doctor),
+) -> Any:
+    """
+    Move an emergency along.
+
+    Acting on an unclaimed emergency also claims it, so the queue stops
+    offering it to every other clinician while this one works it.
+    """
+    response, _ = await sos_service.update_status(
+        db, id, current_user, payload.status, payload.note
+    )
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response
+
+
+@router.post("/emergencies/{id}/cancel", response_model=SOSEmergencyResponse)
+async def cancel_emergency(
+    id: uuid.UUID,
+    payload: SOSCancelRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_approved_doctor),
+) -> Any:
+    """Stand an emergency down — a false alarm, or a duplicate."""
+    response, _ = await sos_service.cancel(db, id, current_user, payload.reason)
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response

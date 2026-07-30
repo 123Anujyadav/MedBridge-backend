@@ -158,6 +158,81 @@ class Settings(BaseSettings):
     """
 
 
+    # ── Emergency communication (Phase 3) ────────────────────────────────
+    #
+    # Every one of these is optional. A missing credential disables the channel
+    # it belongs to and nothing else: the SOS workflow keeps recording
+    # emergencies, the dashboards keep updating, and the attempt is written to
+    # the communication log as `skipped` with the reason. An emergency system
+    # that refuses to record an emergency because a telephony vendor is
+    # unconfigured would be worse than one that cannot telephone.
+
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""
+    """The caller ID for voice and the sender for SMS."""
+
+    TWILIO_WHATSAPP_NUMBER: str = ""
+    """
+    The WhatsApp sender, in `whatsapp:+…` form or as a bare number.
+
+    Separate from `TWILIO_PHONE_NUMBER` because a WhatsApp sender is a
+    different, separately-approved identity — the sandbox number during
+    development, an approved business sender in production. Absent means the
+    WhatsApp channel is skipped, not that the alert fails.
+    """
+
+    GOOGLE_MAPS_API_KEY: str = ""
+    """
+    Enables reverse geocoding, nearby-hospital search and distance/ETA.
+
+    Deliberately optional and read at call time, not at import. Adding the key
+    to the environment and restarting turns every Maps-backed feature on with
+    no code change; while it is absent the platform falls back to the stored
+    coordinates and a plain map link, and never invents an address, a hospital
+    or an ETA.
+    """
+
+    PUBLIC_BASE_URL: str = ""
+    """
+    The externally reachable origin of this API, e.g. `https://api.example.com`.
+
+    Twilio delivery callbacks are only requested when this is set: a callback
+    URL Twilio cannot reach is worse than none, because the provider retries it
+    and the log fills with failures that say nothing about the message. Absent
+    means delivery tracking stops at "accepted by the provider", which is
+    recorded honestly rather than guessed at. Adding it later turns full
+    lifecycle tracking on with no code change.
+    """
+
+    EMERGENCY_COMMS_ENABLED: bool = True
+    """
+    Master switch for outbound emergency communication.
+
+    Exists so a staging or demo deployment can run the whole SOS workflow —
+    records, timeline, realtime — without placing real telephone calls to real
+    people. Attempts are logged as `skipped`, so the audit trail still shows
+    what would have been sent.
+    """
+
+    EMERGENCY_COMMS_MAX_ATTEMPTS: int = 4
+    EMERGENCY_COMMS_BACKOFF_SECONDS: int = 30
+    """
+    First retry delay. Each further attempt doubles it — 30s, 60s, 120s — so a
+    vendor outage of a few minutes is ridden out without a operator, and a
+    permanently bad number stops being retried instead of looping forever.
+    """
+
+    EMERGENCY_RETRY_SWEEP_SECONDS: int = 30
+    """
+    How often the in-process sweeper looks for due retries.
+
+    The sweep also runs as a Celery beat task. Both are safe together: rows are
+    claimed with an atomic conditional update, so whichever gets there first
+    owns the attempt. The in-process loop exists because Celery needs a broker,
+    and an emergency notification must not depend on one being reachable.
+    """
+
     # CORS
     BACKEND_CORS_ORIGINS: Annotated[
         List[str], BeforeValidator(parse_cors_origins)

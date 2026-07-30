@@ -32,7 +32,15 @@ from app.schemas.admin_api import (
     VerifyDoctorRequest,
     HospitalResponse,
 )
+from app.schemas.sos import (
+    SOSAssignDoctorRequest,
+    SOSCancelRequest,
+    SOSEmergencyResponse,
+    SOSStatusUpdateRequest,
+)
 from app.services.admin import admin_service
+from app.services.sos import sos_service
+from app.services.sos_notifications import get_emergency_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -437,3 +445,82 @@ async def system_monitoring(
     Perform live health ping diagnostics of core services (database, Redis, task queue).
     """
     return await admin_service.get_system_status(db, redis)
+
+
+# ---------------------------------------------------------------------------
+# SOS emergencies — administrators see every emergency on the platform.
+# ---------------------------------------------------------------------------
+
+@router.get("/emergencies", response_model=List[SOSEmergencyResponse])
+async def list_all_emergencies(
+    active_only: bool = Query(True, description="Only emergencies still running."),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Every emergency, newest first."""
+    return await sos_service.list_for_actor(db, current_user, active_only=active_only)
+
+
+@router.get("/emergencies/{id}", response_model=SOSEmergencyResponse)
+async def get_emergency_detail(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """One emergency, with its full timeline."""
+    return await sos_service.get_one(db, id, current_user)
+
+
+@router.put("/emergencies/{id}/status", response_model=SOSEmergencyResponse)
+async def admin_update_emergency_status(
+    id: uuid.UUID,
+    payload: SOSStatusUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Move an emergency along."""
+    response, _ = await sos_service.update_status(
+        db, id, current_user, payload.status, payload.note
+    )
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response
+
+
+@router.put("/emergencies/{id}/assign", response_model=SOSEmergencyResponse)
+async def assign_emergency_doctor(
+    id: uuid.UUID,
+    payload: SOSAssignDoctorRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    Hand an emergency to a named clinician.
+
+    The clinician must be active and approved — the same rule the doctor portal
+    enforces, so an emergency is never assigned to somebody who could not open
+    it.
+    """
+    response, _ = await sos_service.assign_doctor(
+        db, id, current_user, payload.doctor_id
+    )
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response
+
+
+@router.post("/emergencies/{id}/cancel", response_model=SOSEmergencyResponse)
+async def admin_cancel_emergency(
+    id: uuid.UUID,
+    payload: SOSCancelRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Stand an emergency down."""
+    response, _ = await sos_service.cancel(db, id, current_user, payload.reason)
+    await db.commit()
+
+    await get_emergency_notifier().emergency_updated(response)
+    return response

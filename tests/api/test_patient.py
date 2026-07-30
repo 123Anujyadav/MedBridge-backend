@@ -272,11 +272,19 @@ async def test_patient_emergency_panic(client: AsyncClient, setup_patient_data, 
     panic_resp = await client.post("/api/v1/patient/emergency", json=panic_payload, headers=headers)
     assert panic_resp.status_code == 201
     panic_data = panic_resp.json()
-    assert panic_data["ambulance_dispatched"] is True
-    assert panic_data["hospital_name"] == "Aronofy Boston Hospital"  # Routed to our mock hospital
     req_id = panic_data["id"]
+
+    # The route no longer invents its own outcome. It used to answer with
+    # `ambulance_dispatched: true`, a hard-coded unit, a twelve-minute ETA and a
+    # hospital picked when none had capacity — none of which had happened. A
+    # patient reading that would have stopped looking for other help, so the
+    # record now says only what is true: an emergency exists and is pending.
+    assert panic_data["ambulance_dispatched"] is False
+    assert panic_data["hospital_name"] is None
+    assert panic_data["eta"] is None
+    assert panic_data["status"] == "pending"
 
     # 2. Track Emergency Dispatch Status
     track_resp = await client.get(f"/api/v1/patient/emergency/{req_id}", headers=headers)
     assert track_resp.status_code == 200
-    assert track_resp.json()["status"] == "dispatched"
+    assert track_resp.json()["status"] == "pending"

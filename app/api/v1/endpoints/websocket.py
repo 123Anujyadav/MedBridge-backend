@@ -28,14 +28,29 @@ async def websocket_endpoint(
         # Same verifier the HTTP dependencies use, so the socket can never
         # accept a token the REST API would reject.
         identity = get_token_verifier().verify(token).require_access_token()
-        user_id = identity.subject
 
-        # Role and status always come from the database, never the token.
-        user = await user_repository.get(db, user_id)
+        # Resolve the token's subject the same way the HTTP dependency does.
+        #
+        # `identity.subject` is only the *local* user id under the built-in
+        # provider. Under Supabase it is the provider's own id, so looking it up
+        # as a primary key never matched and every socket was refused — realtime
+        # was silently dead in any Supabase deployment. `resolve_local_user`
+        # handles both, and is the same function `get_current_user` uses, so the
+        # socket can never accept an identity the REST API would reject.
+        from app.services.identity_link import resolve_local_user
+
+        user = await resolve_local_user(db, identity)
         if not user or not user.is_active:
-            logger.warning(f"Rejected WebSocket connection: User {user_id} not active or not found.")
+            logger.warning(
+                "Rejected WebSocket connection: subject %s not active or not found.",
+                identity.subject,
+            )
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
+
+        # The local id, not the provider's: `send_personal_message` is keyed by
+        # it, and every payload carries local ids.
+        user_id = str(user.id)
 
         # An unapproved or rejected clinician must not receive the live
         # clinical broadcasts either — the socket carries case and appointment

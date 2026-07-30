@@ -38,3 +38,4 @@ langchain-huggingface>=0.0.1
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.2
 langchain-text-splitters>=0.0.1
+twilio>=9.0.0

@@ -11,7 +11,9 @@ from app.models.appointment import Appointment  # noqa
 from app.models.report import Report  # noqa
 from app.models.report_version import ReportVersion  # noqa
 from app.models.notification import NotificationItem  # noqa
-from app.models.emergency import EmergencyRequest  # noqa
+from app.models.emergency import EmergencyRequest, EmergencyStatusEvent  # noqa
+from app.models.emergency_profile import EmergencyProfile  # noqa
+from app.models.communication import CommunicationLog  # noqa
 from app.models.audit import AuditLog  # noqa
 from app.models.consent import ConsentRecord  # noqa
 from app.models.vital_reading import VitalReading  # noqa

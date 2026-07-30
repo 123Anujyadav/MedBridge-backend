@@ -36,4 +36,28 @@ EXPOSE 8000
 # Migrations run before the server starts, so a fresh deployment cannot come up
 # against an empty schema.
 ENTRYPOINT ["./docker/entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Run behind a reverse proxy, correctly.
+#
+# `sh -c` rather than the exec form because both values have to come from the
+# environment; `exec` keeps uvicorn as PID 1 so it still receives SIGTERM and
+# shuts down cleanly.
+#
+# --proxy-headers is on by default in uvicorn, but it is useless on its own:
+#   `--forwarded-allow-ips` defaults to 127.0.0.1, and Railway's proxy reaches
+#   the container from an internal address that is not loopback. Every
+#   X-Forwarded-* header was therefore discarded, which meant:
+#     * `request.client.host` was the proxy's address, so the whole platform
+#       shared ONE rate-limit bucket — the first five sign-in attempts from
+#       anybody locked out every other user for the rest of the minute;
+#     * `request.url.scheme` was http behind TLS termination.
+#
+#   FORWARDED_ALLOW_IPS defaults to `*` here because the container is only
+#   reachable through the platform's ingress. Set it to the proxy's address
+#   range on any deployment where the container is directly addressable —
+#   trusting the header from an arbitrary client lets that client choose the
+#   IP its rate limit is counted against.
+#
+# PORT is injected by Railway; the fallback keeps `docker run` and compose
+# working unchanged.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-*}\""]

@@ -84,5 +84,11 @@ class Patient(Base):
     prescriptions = relationship("Prescription", back_populates="patient", cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="patient", cascade="all, delete-orphan")
     emergency_requests = relationship("EmergencyRequest", back_populates="patient", cascade="all, delete-orphan")
+    emergency_profile = relationship(
+        "EmergencyProfile",
+        back_populates="patient",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     consent_records = relationship("ConsentRecord", back_populates="patient", cascade="all, delete-orphan")
     vital_readings = relationship("VitalReading", back_populates="patient", cascade="all, delete-orphan")
