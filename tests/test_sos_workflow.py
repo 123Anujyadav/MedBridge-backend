@@ -157,7 +157,7 @@ class TestTrigger:
         assert row.ambulance_dispatched is False
         assert row.eta is None
         assert row.hospital_name is None
-
+    
     async def test_the_first_timeline_entry_is_written(self, client, estate, db):
         headers = await auth(client, PATIENT_A)
         r = await raise_sos(client, headers)

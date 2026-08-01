@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai_core import AnalysisAgent, ChatAgent, SPECIALIST_PROMPTS
 from app.core.ai_provider import get_groq_api_key
+from app.intake.domain.specialties import (
+    CANONICAL_SPECIALTIES,
+    canonicalise_specialty,
+)
 from app.models.report import Report
 
 logger = logging.getLogger(__name__)
@@ -20,6 +24,60 @@ class AIService:
         self.api_key = api_key or get_groq_api_key()
         self.analysis_agent = AnalysisAgent(api_key=self.api_key)
         self.chat_agent = ChatAgent(api_key=self.api_key)
+
+    @staticmethod
+    def _parse_report_sections(content: str) -> Dict[str, str]:
+        """
+        Split the clinical report into its numbered sections.
+
+        Keyed by the section number as a string, so a renamed heading does not
+        silently drop the field the way a title match would.
+        """
+        sections: Dict[str, str] = {}
+        current: Optional[str] = None
+        buffer: List[str] = []
+        for line in (content or "").splitlines():
+            heading = re.match(r"^\s*#{1,6}\s*(\d{1,2})\s*[.)]\s*(.*)$", line)
+            if heading:
+                if current is not None:
+                    sections[current] = "\n".join(buffer).strip()
+                current = heading.group(1)
+                buffer = []
+            elif current is not None:
+                buffer.append(line)
+        if current is not None:
+            sections[current] = "\n".join(buffer).strip()
+        return sections
+
+    @staticmethod
+    def _parse_urgency(risk_section: str) -> str:
+        """
+        Map the Clinical Risk Level section onto the stored urgency.
+
+        Checked most severe first: "moderate to high" is a high-risk statement,
+        and testing "low" first would file it as low.
+        """
+        text = (risk_section or "").lower()
+        for needle, level in (
+            ("critical", "critical"), ("emergency", "critical"),
+            ("high", "high"), ("severe", "high"), ("urgent", "high"),
+            ("moderate", "medium"), ("medium", "medium"),
+            ("low", "low"), ("mild", "low"), ("minimal", "low"),
+        ):
+            if needle in text:
+                return level
+        return "medium"
+
+    @staticmethod
+    def _parse_symptoms(symptom_section: str) -> List[str]:
+        """Pull the bullet list out of the model's Symptom Summary section."""
+        found: List[str] = []
+        for line in (symptom_section or "").splitlines():
+            item = re.sub(r"^\s*(?:[-*+•]|\d+[.)])\s*", "", line).strip()
+            item = item.strip("*_` ")
+            if 2 < len(item) < 120:
+                found.append(item)
+        return found[:10]
 
     async def process_symptom_intake(
         self,
@@ -59,6 +117,11 @@ class AIService:
             "### 12. Emergency Warning\n"
             "### 13. AI Confidence Score\n"
             "### 14. Timestamp\n"
+            "### 15. Recommended Specialty\n"
+            "\n"
+            "Section 5 must contain exactly one of: Low, Medium, High, Critical.\n"
+            "Section 15 must contain exactly one specialty name and nothing else, "
+            "chosen from: " + ", ".join(CANONICAL_SPECIALTIES) + ".\n"
         )
 
         analysis_result = self.analysis_agent.analyze_report(
@@ -68,28 +131,30 @@ class AIService:
 
         content_text = analysis_result.get("content", "") if isinstance(analysis_result, dict) else str(analysis_result)
 
-        # Helper parsers for structured payload
-        urgency_level = "medium"
-        content_lower = content_text.lower()
-        if "high" in content_lower or "urgent" in content_lower or "emergency" in content_lower:
-            urgency_level = "high"
-        elif "low" in content_lower or "mild" in content_lower:
-            urgency_level = "low"
+        # Read the structured fields out of the numbered sections the prompt
+        # mandates, rather than scanning the whole document for keywords.
+        #
+        # Scanning was not a weaker version of this — it was a constant. The
+        # prompt requires a "12. Emergency Warning" heading, so the substring
+        # "emergency" is present in every reply and urgency was unconditionally
+        # "high". The specialty search looked for department nouns ("Neurology")
+        # in prose that says "migraine" or "neurologist", so nothing ever
+        # matched and every case fell through to General Medicine — which is
+        # also what picks the doctor a case is routed to, below.
+        sections = self._parse_report_sections(content_text)
 
-        # Determine recommended specialty
-        recommended_specialty = "General Medicine"
-        specialties = ["Cardiology", "Neurology", "Gastroenterology", "Pulmonology", "Dermatology", "Orthopedics", "Endocrinology"]
-        for spec in specialties:
-            if spec.lower() in content_lower:
-                recommended_specialty = spec
-                break
+        urgency_level = self._parse_urgency(sections.get("5", ""))
+        recommended_specialty = canonicalise_specialty(sections.get("15", ""))
 
-        # Extract symptom tags
-        extracted_symptoms = []
-        for line in symptom_text.split("."):
-            line_clean = line.strip()
-            if line_clean and len(line_clean) > 3 and len(line_clean) < 60:
-                extracted_symptoms.append(line_clean)
+        # Symptom tags come from the model's own "Symptom Summary" section.
+        # Splitting the patient's raw sentence on "." only ever echoed their
+        # words back, and any sentence of 60 characters or more produced the
+        # literal placeholder "Symptom intake analyzed".
+        extracted_symptoms = self._parse_symptoms(sections.get("3", ""))
+        if not extracted_symptoms:
+            extracted_symptoms = [
+                s.strip() for s in symptom_text.split(".") if 3 < len(s.strip()) < 120
+            ]
         if not extracted_symptoms:
             extracted_symptoms = ["Symptom intake analyzed"]
 

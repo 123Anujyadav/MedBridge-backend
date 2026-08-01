@@ -358,6 +358,34 @@ async def submit_feedback(
     )
     return {"status": "success", "message": "Feedback submitted successfully."}
 
+CLINICIAN_DRAFT_STATUSES = frozenset({"pending_review", "needs_revision", "rejected"})
+"""
+States in which a report is a clinician's working draft, not a document.
+
+A patient may read a report that is merely awaiting action — an AI intake
+summary written from their own words is served to them in full by
+`GET /patient/reports/{id}` — but a document a clinician is still drafting,
+revising or has rejected is not theirs until it is released.
+"""
+
+
+def _may_render_for(current_user: User, report: Any) -> bool:
+    """
+    Whether a missing document may be produced on demand for this caller.
+
+    Rendering makes a document exist where none did, so it is deliberately
+    narrower than the read check above. Before on-demand rendering existed, a
+    patient asking for a report with no stored file got a 404, and that
+    accidental 404 was the only thing keeping clinician drafts out of their
+    hands. Generating one now would hand over a document that was never
+    released, so the draft states are refused for patients and only for them —
+    clinicians and administrators are working on exactly those drafts.
+    """
+    if current_user.role != "patient":
+        return True
+    return (report.status or "") not in CLINICIAN_DRAFT_STATUSES
+
+
 @router.get("/reports/{id}/download")
 async def download_report_pdf(
     id: uuid.UUID,
@@ -421,9 +449,6 @@ async def download_report_pdf(
         source_url = report.file_url
         label = ""
 
-    if not source_url:
-        raise EntityNotFoundException("Report PDF", str(id))
-
     # --- path resolution (constrained to the uploads directory) ----------
     # Shared with the writers via core.upload. This route used to compute its
     # own relative path and landed on app/uploads instead of Backend/uploads,
@@ -431,21 +456,42 @@ async def download_report_pdf(
     from app.core.upload import UPLOADS_ROOT
 
     uploads_root = UPLOADS_ROOT
-    stored = source_url or ""
-    if not stored.startswith("/uploads/"):
-        # Never treat an arbitrary stored string as a filesystem path.
-        logger.warning(f"Report {id} has a non-uploads file_url; refusing to serve.")
-        raise EntityNotFoundException("Report File", str(id))
+    file_path: Optional[str] = None
 
-    file_path = os.path.abspath(
-        os.path.join(uploads_root, stored[len("/uploads/"):])
-    )
-    if not file_path.startswith(uploads_root + os.sep):
-        logger.error(f"Path traversal attempt blocked for report {id}")
-        raise AuthorizationException("Invalid report path.")
+    if source_url:
+        if not source_url.startswith("/uploads/"):
+            # Never treat an arbitrary stored string as a filesystem path.
+            logger.warning(f"Report {id} has a non-uploads file_url; refusing to serve.")
+            raise EntityNotFoundException("Report File", str(id))
 
-    if not os.path.exists(file_path):
-        raise EntityNotFoundException("Report File", str(id))
+        candidate = os.path.abspath(
+            os.path.join(uploads_root, source_url[len("/uploads/"):])
+        )
+        if not candidate.startswith(uploads_root + os.sep):
+            logger.error(f"Path traversal attempt blocked for report {id}")
+            raise AuthorizationException("Invalid report path.")
+        if os.path.exists(candidate):
+            file_path = candidate
+
+    if file_path is None and version is None and _may_render_for(current_user, report):
+        # Nothing servable for the live document — either it never had a file,
+        # or the row points at one that is no longer on disk.
+        #
+        # Only the consultation flow renders a PDF at issue time. A report
+        # written by the AI intake pipeline, an uploaded record or a lab result
+        # keeps its text in `report.content` and has no file at all, so this
+        # route answered 404 for most of the reports in the system while the UI
+        # offered a download button for every one of them. The version branch
+        # above has always rendered a missing document on demand; the live
+        # document now does the same.
+        file_path = await report_version_service.render_current_document(db, report)
+
+    if file_path is None:
+        # The row exists but there is no document behind it and nothing to
+        # build one from. Raised as the same typed domain error the rest of the
+        # API uses, so the client receives a clean JSON envelope it can turn
+        # into "Report not available" — never a stack trace or a raw failure.
+        raise EntityNotFoundException("Report document", str(id))
 
     # HIPAA access logging: a patient retrieving their own report is a
     # disclosure event and belongs on the case history.
@@ -463,13 +509,32 @@ async def download_report_pdf(
             ip_address=_client_ip(request),
         )
 
+    # A report is not always a PDF. `POST /patient/records` accepts JPEG, PNG,
+    # plain text and Word documents and stores the upload as the report's file,
+    # so answering every download with `application/pdf` and a `.pdf` name
+    # handed the patient back their own scan under a name that will not open.
+    # Generated documents are PDFs and are unaffected.
+    extension = os.path.splitext(file_path)[1].lower()
+    media_type = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".txt": "text/plain",
+        ".doc": "application/msword",
+        ".docx": (
+            "application/vnd.openxmlformats-officedocument"
+            ".wordprocessingml.document"
+        ),
+    }.get(extension, "application/octet-stream")
+
     filename = os.path.basename(file_path)
     if disposition == "inline":
         # FileResponse always sets `attachment` when given a filename, so the
         # header is written explicitly for the preview case.
         return FileResponse(
             path=file_path,
-            media_type="application/pdf",
+            media_type=media_type,
             headers={
                 "Content-Disposition": f'inline; filename="{filename}"',
                 # Versions are immutable, so their rendering can be cached hard.
@@ -481,7 +546,7 @@ async def download_report_pdf(
     safe_title = "".join(c for c in report.title if c.isalnum() or c in " -_").strip()
     return FileResponse(
         path=file_path,
-        media_type="application/pdf",
-        filename=f"{safe_title or 'clinical-report'}{label}.pdf",
+        media_type=media_type,
+        filename=f"{safe_title or 'clinical-report'}{label}{extension or '.pdf'}",
     )
 

@@ -371,6 +371,71 @@ class ReportVersionService:
         await db.flush()
         return version
 
+    async def render_current_document(
+        self, db: AsyncSession, report: Report
+    ) -> Optional[str]:
+        """
+        Render the report as it stands now, and return the file's path.
+
+        Only some reports arrive with a rendered document. The consultation flow
+        generates a PDF at issue time and stores it on `report.file_url`, but a
+        report written by the AI intake pipeline, an uploaded record, or a lab
+        result holds its text in `report.content` and has no file at all — so
+        the download route, which served `file_url` and nothing else, answered
+        404 for a report that plainly exists and is being displayed on screen.
+        `render_version` already renders a missing document on demand; this is
+        the same behaviour for the live one.
+
+        Returns None when there is genuinely nothing to render, which is the
+        caller's cue to say so rather than to serve an empty document.
+
+        The result is deliberately **not** written back to `report.file_url`.
+        Report content is editable (`PUT /doctor/reports/{id}/content`) and that
+        path does not clear the stored file, so caching here would pin the
+        download to superseded text. Rendering under a stable per-report name
+        instead keeps one file per report, overwritten in place, always current.
+        """
+        if report.file_url:
+            existing = self._resolve_file(report.file_url)
+            if existing:
+                return existing
+
+        body = _norm(report.content) or _norm(report.summary)
+        if not body:
+            return None
+
+        from app.services.report_generator import report_generator
+
+        patient = await db.get(Patient, report.patient_id)
+        patient_name = (
+            f"{patient.first_name} {patient.last_name}".strip()
+            if patient else report.patient_name
+        )
+        case = await db.get(Case, report.case_id) if report.case_id else None
+        doctor = await db.get(Doctor, case.doctor_id) if case and case.doctor_id else None
+        doctor_name = (
+            f"Dr. {doctor.first_name} {doctor.last_name}".strip()
+            if doctor else (report.doctor_name or "Attending Physician")
+        )
+
+        meta = report_generator.generate_pdf(
+            patient_name=patient_name,
+            patient_id=str(report.patient_id),
+            doctor_name=doctor_name,
+            doctor_id=str(doctor.id) if doctor else "",
+            symptoms=(case.symptom_summary if case else "") or "Not recorded",
+            # This document was never through a clinician's hands, so there is
+            # no diagnosis to print. "Pending evaluation" is what the version
+            # renderer prints in the same situation.
+            diagnosis="Pending evaluation",
+            clinical_notes=body,
+            medications=[],
+            hospital_name=report.hospital_name or "MedBridge Medical Center",
+            clinical_summary=_norm(report.summary) or None,
+            filename_stem=f"report_{report.id}_current",
+        )
+        return self._resolve_file(meta["file_url"])
+
     @staticmethod
     def _resolve_file(file_url: str | None) -> Optional[str]:
         """Absolute path for a stored document, or None if it is not servable."""

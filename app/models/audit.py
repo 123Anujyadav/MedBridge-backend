@@ -27,7 +27,7 @@ class AuditLog(Base):
         Index("idx_audit_case_created", "case_id", "created_at"),
     )
 
-
+    
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,

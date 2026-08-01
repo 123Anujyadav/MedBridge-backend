@@ -200,6 +200,15 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(SQLAlchemyError)
     async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+        """
+        Report a database failure without quoting the database.
+
+        Same rule as the `IntegrityError` handler above: the full error is
+        logged, never returned. `str(exc)` on a SQLAlchemy error carries the
+        failing statement, table and column names and the bound parameters —
+        which is patient data as often as it is schema — and this handler is
+        reachable from every authenticated endpoint.
+        """
         logger.error(f"Database operational error on {request.url.path}: {str(exc)}", exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -207,7 +216,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "success": False,
                 "message": "Database operation failed. Transaction rolled back.",
                 "code": "DATABASE_ERROR",
-                "details": str(exc)
+                "details": "The request could not be completed."
             }
         )
 

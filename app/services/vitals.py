@@ -219,11 +219,16 @@ class VitalsService:
             if not active:
                 continue
 
-            expected = sum(max(1, len(m.scheduled_times or []) or 1) for m in active)
             taken = sum(min(m.taken_doses or 0, m.total_doses or 0) for m in active)
             total = sum(m.total_doses or 0 for m in active)
 
             # Percentage of the course completed so far, capped at 100.
+            #
+            # `doses_expected` is the denominator of that percentage — the whole
+            # course. It previously reported the number of doses scheduled on a
+            # single day, which put three different units in one point: a course
+            # ratio, a course-to-date count and a per-day count. A patient ten
+            # doses into a 210-dose course saw "15 of 3 doses taken — 7%".
             ratio = (taken / total * 100.0) if total > 0 else 0.0
             points.append(
                 AdherencePoint(
@@ -231,7 +236,7 @@ class VitalsService:
                     date=day_str,
                     adherence=round(min(ratio, 100.0), 1),
                     doses_taken=taken,
-                    doses_expected=expected,
+                    doses_expected=total,
                 )
             )
 

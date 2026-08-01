@@ -73,7 +73,7 @@ class AssistantConversation(Base):
         order_by="AssistantMessage.created_at",
     )
 
-
+# the assistant message class is for the message log that will be stored in the database that will be used for the AI Medical Assistant
 class AssistantMessage(Base):
     """One turn, with the structured payload the UI rendered."""
 

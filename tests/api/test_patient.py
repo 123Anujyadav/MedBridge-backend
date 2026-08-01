@@ -1,5 +1,6 @@
 import pytest
 import uuid
+from datetime import date, timedelta
 from httpx import AsyncClient
 from sqlalchemy import select
 from app.models.user import User
@@ -221,8 +222,12 @@ async def test_patient_dashboard(client: AsyncClient, setup_patient_data, db):
         duration="30 days",
         status="active",
         scheduled_times=["08:00"],
-        start_date="2026-07-01",
-        end_date="2026-07-31"
+        # Anchored to the run date. Hardcoded dates made this a time bomb: the
+        # dashboard only returns medications whose course covers today, so the
+        # assertion below began failing permanently once the fixed end date
+        # passed.
+        start_date=(date.today() - timedelta(days=30)).isoformat(),
+        end_date=(date.today() + timedelta(days=30)).isoformat()
     )
     db.add(med)
     await db.flush()

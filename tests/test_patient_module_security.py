@@ -194,15 +194,21 @@ class TestReportDownloadAuthorisation:
 
     async def test_owner_passes_authorisation(self, client, two_doctors_two_patients):
         """
-        Owner clears the authorisation gate; the file itself is absent in tests,
-        so a 404 here proves access was granted and only the file was missing.
+        The owner clears the authorisation gate and receives their document.
+
+        This asserted 404 while the route could only serve a pre-rendered file:
+        the report had none, so a 404 was the closest available proof that
+        access had been granted and only the file was missing. The document is
+        now rendered on demand, so the same thing is proved directly — and the
+        200 is what the other two tests in this class are contrasted against.
         """
         headers = await _login(client, "pA")
         report_id = two_doctors_two_patients["report_id"]
         resp = await client.get(
             f"/api/v1/shared/reports/{report_id}/download", headers=headers
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.content[:4] == b"%PDF"
 
 
 class TestUploadValidation:

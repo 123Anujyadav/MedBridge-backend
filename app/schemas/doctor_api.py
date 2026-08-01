@@ -81,6 +81,8 @@ class CaseResponse(BaseModel):
     attachments: List[Any] = []
     patient_history: Optional[str] = None
     notes: str
+    # Null until a clinician completes the consultation.
+    diagnosis: Optional[str] = None
 
     class Config:
         from_attributes = True

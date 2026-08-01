@@ -119,3 +119,51 @@ class TestRateLimiterUsesTheResolvedClient:
             "the limiter must not parse the header itself; uvicorn does it "
             "behind a trust boundary"
         )
+
+
+FRONTEND = Path(__file__).resolve().parents[2] / "Frontend"
+
+
+class TestSinglePageAppRouting:
+    """
+    The frontend is a client-side-routed SPA served as static files.
+
+    Only `/index.html` exists on disk; `/patient/dashboard` and every other
+    route are produced by the router in the browser. A static host asked for a
+    path with no matching file answers 404, so refreshing any page other than
+    the root — or opening a link to one — failed, even though the same URL
+    worked when reached by clicking through the app.
+
+    Asserted as configuration because there is no test that can catch it at
+    runtime: the dev server rewrites unknown paths to `index.html` by itself,
+    so the bug is invisible until the built output is on a real host.
+    """
+
+    def test_vercel_rewrites_every_path_to_the_shell(self):
+        import json
+
+        config = FRONTEND / "vercel.json"
+        assert config.is_file(), "Frontend/vercel.json is missing"
+
+        rewrites = json.loads(config.read_text(encoding="utf-8")).get("rewrites")
+        assert rewrites, "vercel.json declares no rewrites"
+        assert any(
+            r.get("destination") == "/index.html"
+            and r.get("source") in ("/(.*)", "/:path*")
+            for r in rewrites
+        ), "no catch-all rewrite to /index.html"
+
+    def test_a_generic_static_host_fallback_ships_with_the_build(self):
+        """
+        `public/_redirects` is copied verbatim into `dist/` by Vite, which
+        covers Netlify and Cloudflare Pages without a second build step.
+        """
+        redirects = FRONTEND / "public" / "_redirects"
+        assert redirects.is_file(), "Frontend/public/_redirects is missing"
+
+        body = redirects.read_text(encoding="utf-8").strip()
+        assert "/index.html" in body and body.startswith("/*")
+        assert "200" in body, (
+            "the fallback must rewrite with 200, not redirect with 301 — a "
+            "redirect changes the URL and loses the route the user asked for"
+        )

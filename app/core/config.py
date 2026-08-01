@@ -97,6 +97,30 @@ class Settings(BaseSettings):
     RATE_LIMIT_EMERGENCY: int = 10
     RATE_LIMIT_DEFAULT: int = 60
 
+    RATE_LIMIT_AI: int = 30
+    """
+    Requests per minute against the generative AI endpoints, per caller.
+
+    These are the only routes on the platform that spend money per request: an
+    LLM call to Groq. Left unlimited they are both a billing exposure and the
+    cheapest denial-of-service target here, because one request occupies a
+    worker for seconds rather than milliseconds.
+
+    Thirty is chosen to be unreachable by a person and obvious to a script. A
+    model call takes roughly two to twenty seconds, so a patient working
+    quickly manages a handful a minute; a loop reaches this in under a second.
+    """
+
+    RATE_LIMIT_AI_READ: int = 90
+    """
+    Requests per minute for the AI routes that only read stored state.
+
+    Conversation history and the agent health probes cost a database query, not
+    a model call, so they are budgeted separately — otherwise a dashboard
+    polling `/ai/*/health` would consume the same allowance the patient needs
+    in order to hold a conversation.
+    """
+
     # AI Agent Integration
     GROQ_API_KEY: str = ""
 

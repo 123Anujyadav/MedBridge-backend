@@ -234,7 +234,6 @@ class TestDerivedMilestones:
         assert all(e["source"] in {"recorded", "derived"} for e in events)
         assert any(e["source"] == "derived" for e in events)
 
-
 class TestCaseScoping:
     async def test_other_cases_events_are_absent(self, client, estate):
         """Both cases share a patient and a doctor; only the FK separates them."""

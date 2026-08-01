@@ -52,6 +52,13 @@ class Case(Base):
     
     patient_history: Mapped[str] = mapped_column(Text, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # The clinician's conclusion for this case. `ConsultationService` has always
+    # assigned to `case.diagnosis`; without a mapped column SQLAlchemy accepted
+    # it as an ordinary Python attribute and dropped it at flush, so completing
+    # a consultation recorded the diagnosis on the generated report and the
+    # prescription but never on the case itself.
+    diagnosis: Mapped[str] = mapped_column(String(255), nullable=True)
     
     assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
