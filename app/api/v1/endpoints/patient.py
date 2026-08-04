@@ -13,6 +13,7 @@ from app.repositories.prescription import prescription_repository, medication_re
 from app.repositories.report import report_repository
 from app.repositories.notification import notification_repository
 from app.schemas.patient import ConsentFlagsSchema, PatientResponse, PatientUpdate
+from app.services.maps import get_maps_service
 from app.schemas.shared_api import NotificationResponse
 from app.schemas.emergency_profile import (
     EmergencyLocationUpdate,
@@ -37,6 +38,8 @@ from app.schemas.patient_api import (
     EmergencyPanicResponse,
     MedicationAdherenceTrack,
     MedicationResponse,
+    NearbyHospitalItem,
+    NearbyHospitalsResponse,
     PatientDashboardResponse,
     PrescriptionResponse,
     ReportResponse,
@@ -677,6 +680,103 @@ async def get_sos_hospital(
     """
     await sos_service.get_one(db, id, current_user)
     return await sos_timeline_service.hospital_summary(db, id)
+
+
+@router.get("/hospitals/nearby", response_model=NearbyHospitalsResponse)
+async def get_nearby_hospitals(
+    latitude: float = Query(ge=-90, le=90),
+    longitude: float = Query(ge=-180, le=180),
+    limit: int = Query(5, ge=1, le=10),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    Facilities near a coordinate, nearest first, with driving distance and ETA.
+
+    The emergency screen needs a list; `nearest_hospital_with_eta` answers with
+    the single best one. Both are the same two steps — Overpass for the
+    facilities, one ORS matrix request for the road distances — so this composes
+    the existing service methods rather than restating any of that logic here.
+
+    Never raises for an upstream failure. Overpass shedding load or ORS timing
+    out is not the patient's problem to see: the response says `available:
+    false` with a plain-language reason, and the screen keeps its emergency
+    call buttons. Upstream error text is deliberately not forwarded — it names
+    internal hosts and would be meaningless on a phone screen during an
+    emergency.
+    """
+    maps = get_maps_service()
+
+    # The service contract is that every upstream failure already flattens to
+    # an empty list, so this catch should never fire. It exists because the
+    # cost of being wrong is asymmetric: on this screen a 500 replaces the
+    # emergency call buttons with a broken page, which is the one outcome
+    # worth spending a try block to prevent.
+    try:
+        hospitals = await maps.find_nearby_hospitals(latitude, longitude, limit=limit)
+    except Exception:
+        logger.exception("[NEARBY_HOSPITALS_FAILED] facility lookup raised")
+        hospitals = []
+
+    if not hospitals:
+        return NearbyHospitalsResponse(
+            available=False,
+            reason=(
+                "We could not reach the facility directory just now. "
+                "If this is urgent, call your local emergency number."
+            ),
+            latitude=latitude,
+            longitude=longitude,
+            hospitals=[],
+        )
+
+    # One matrix request covering every candidate, not one per candidate.
+    try:
+        metrics = await maps.distance_matrix_many(
+            (latitude, longitude),
+            [(h["latitude"], h["longitude"]) for h in hospitals],
+        )
+    except Exception:
+        # Same reasoning as above. Losing the ETAs is survivable; the
+        # facilities and their addresses are the part that matters.
+        logger.exception("[NEARBY_HOSPITALS_FAILED] routing raised")
+        metrics = []
+
+    # Padded so a short or empty routing result still yields one card per
+    # facility, with the missing legs rendering as "distance unavailable".
+    metrics = list(metrics or []) + [None] * max(0, len(hospitals) - len(metrics or []))
+
+    items: list[NearbyHospitalItem] = []
+    for hospital, metric in zip(hospitals, metrics):
+        metric = metric or {}
+        items.append(
+            NearbyHospitalItem(
+                place_id=hospital["place_id"],
+                name=hospital["name"],
+                address=hospital.get("address"),
+                latitude=hospital["latitude"],
+                longitude=hospital["longitude"],
+                # Absent whenever routing could not answer. The card renders
+                # "Distance unavailable" rather than a guess.
+                distance_km=metric.get("distance_km"),
+                eta_minutes=metric.get("duration_minutes"),
+                distance_text=metric.get("distance_text"),
+                duration_text=metric.get("duration_text"),
+                phone=hospital.get("phone"),
+                # The shared builder, so the navigation link is identical to
+                # the one the SOS timeline hands out.
+                directions_url=maps.build_directions_url(
+                    (latitude, longitude),
+                    (hospital["latitude"], hospital["longitude"]),
+                ),
+            )
+        )
+
+    return NearbyHospitalsResponse(
+        available=True,
+        latitude=latitude,
+        longitude=longitude,
+        hospitals=items,
+    )
 
 
 @router.post("/emergency", response_model=EmergencyPanicResponse, status_code=status.HTTP_201_CREATED)

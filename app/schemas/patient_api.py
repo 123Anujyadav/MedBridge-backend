@@ -215,3 +215,44 @@ class ReportResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+
+class NearbyHospitalItem(BaseModel):
+    """
+    One facility from the emergency hospital search.
+
+    Every optional field is genuinely unknown when it is null, never a
+    placeholder. OpenStreetMap carries no phone number or live opening state
+    for most facilities, and `distance_km`/`eta_minutes` are null whenever
+    routing could not be reached — an invented ETA on an emergency screen is
+    somewhere an ambulance gets sent.
+    """
+
+    place_id: str
+    name: str
+    address: Optional[str] = None
+    latitude: float
+    longitude: float
+    distance_km: Optional[float] = None
+    eta_minutes: Optional[int] = None
+    distance_text: Optional[str] = None
+    duration_text: Optional[str] = None
+    phone: Optional[str] = None
+    directions_url: str
+
+
+class NearbyHospitalsResponse(BaseModel):
+    """
+    The facilities near a point, nearest first.
+
+    `available` is false whenever there is nothing real to report, with
+    `reason` saying why in language safe to show a patient. An empty list
+    means "we could not find out", never "there are none nearby", so the
+    client must not present it as the latter.
+    """
+
+    available: bool
+    reason: Optional[str] = None
+    latitude: float
+    longitude: float
+    hospitals: List[NearbyHospitalItem] = []

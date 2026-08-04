@@ -22,8 +22,9 @@ import httpx
 
 from app.services.maps import (
     NOMINATIM_USER_AGENT,
+    OVERPASS_QUERY_BUDGET_SECONDS,
+    OVERPASS_TIMEOUT_SECONDS,
     OVERPASS_URL,
-    REQUEST_TIMEOUT_SECONDS,
     get_maps_service,
 )
 
@@ -95,8 +96,13 @@ class OSMPharmacyDiscovery:
         self, *, latitude: float, longitude: float, radius_km: float = 5.0, limit: int = 10
     ) -> list[dict]:
         radius_m = int(radius_km * 1000)
+        # The server-side budget and the client timeout are taken from the same
+        # constants the hospital search uses. They were previously 10s declared
+        # against an 8s client, so this hung up two seconds before Overpass was
+        # even allowed to finish — every slow query became a guaranteed
+        # ReadTimeout and an empty pharmacy list.
         query = f"""
-        [out:json][timeout:10];
+        [out:json][timeout:{OVERPASS_QUERY_BUDGET_SECONDS}];
         (
           node["amenity"="pharmacy"](around:{radius_m},{latitude},{longitude});
           way["amenity"="pharmacy"](around:{radius_m},{latitude},{longitude});
@@ -105,7 +111,7 @@ class OSMPharmacyDiscovery:
         """
 
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_SECONDS) as client:
                 response = await client.post(
                     OVERPASS_URL,
                     data={"data": query},
@@ -116,7 +122,11 @@ class OSMPharmacyDiscovery:
         except Exception as exc:
             # Not an error the caller must handle: the partner network is found
             # from our own tables, and discovery only adds context.
-            logger.warning("[PHARMACY_DISCOVERY_FAILED] %s", exc)
+            # The type is the diagnosis: a shed-load ReadTimeout stringifies
+            # to nothing, leaving an empty and unactionable log line.
+            logger.warning(
+                "[PHARMACY_DISCOVERY_FAILED] %s: %s", type(exc).__name__, exc
+            )
             return []
 
         found: list[dict] = []
