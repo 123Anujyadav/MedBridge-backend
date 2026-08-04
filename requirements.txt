@@ -1,3 +1,25 @@
+# ---------------------------------------------------------------------------
+# PyTorch CPU-only index.
+#
+# `sentence-transformers` requires `torch`, and torch's default PyPI wheel for
+# Linux declares its CUDA runtime as hard dependencies, gated behind
+# `platform_system == "Linux"` markers:
+#
+#     nvidia-cudnn-cu13, nvidia-nccl-cu13, nvidia-cusparselt-cu13,
+#     nvidia-nvshmem-cu13, triton            (torch 2.13.0)
+#
+# Those markers are false on Windows and macOS and true on Railway, which is
+# exactly why this installed cleanly on a laptop and then failed in CI: several
+# gigabytes of GPU runtime for a container that has no GPU.
+#
+# The `+cpu` build published on the index below is the same torch version with
+# those dependencies absent (10 requirements, none of them CUDA). Verified by
+# reading both wheels' METADATA directly.
+#
+# This index is additive: `+cpu` local versions exist only here, so the torch
+# pin below cannot silently resolve back to the PyPI GPU wheel.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
 pydantic[email]>=2.6.0
@@ -36,6 +58,22 @@ qdrant-client>=1.13.0
 langchain-community>=0.0.20
 langchain-huggingface>=0.0.1
 faiss-cpu>=1.7.4
-sentence-transformers>=2.2.2
+
+# Torch is pinned explicitly even though nothing imports it directly: it is a
+# transitive dependency of sentence-transformers, and leaving it implicit is
+# what let the GPU build in. Declaring it here is what makes the `+cpu`
+# variant win.
+#
+# Linux only. Windows and macOS already resolve to CPU-only builds from PyPI,
+# and no `+cpu` wheels are published for macOS, so pinning it there would break
+# local development for no benefit.
+torch==2.13.0+cpu ; sys_platform == "linux"
+torch==2.13.0 ; sys_platform != "linux"
+
+# Floor raised from >=2.2.2. The old floor let pip backtrack into the
+# pre-NumPy-2 releases when a resolution conflict appeared on Linux, and those
+# releases accept much older torch builds that pull the full thirteen-package
+# CUDA set. 5.x is also the line this codebase is developed and tested against.
+sentence-transformers>=5.0.0
 langchain-text-splitters>=0.0.1
 twilio>=9.0.0
