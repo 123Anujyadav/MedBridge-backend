@@ -206,15 +206,52 @@ class Settings(BaseSettings):
     WhatsApp channel is skipped, not that the alert fails.
     """
 
-    GOOGLE_MAPS_API_KEY: str = ""
+    ORS_API_KEY: str = ""
     """
-    Enables reverse geocoding, nearby-hospital search and distance/ETA.
+    OpenRouteService key. Enables driving distance, ETA and route geometry.
 
     Deliberately optional and read at call time, not at import. Adding the key
-    to the environment and restarting turns every Maps-backed feature on with
-    no code change; while it is absent the platform falls back to the stored
-    coordinates and a plain map link, and never invents an address, a hospital
-    or an ETA.
+    to the environment and restarting turns every routing feature on with no
+    code change; while it is absent the platform falls back to the stored
+    coordinates and a plain OpenStreetMap link, and never invents a distance or
+    an ETA.
+
+    Geocoding and place search do not use this key — they run keyless through
+    Nominatim and Overpass, so addresses and nearby hospitals keep working
+    whether or not routing is configured.
+    """
+
+    OPENFDA_API_KEY: str = ""
+    """
+    Optional. Raises the openFDA rate limit from 240 to 240,000 requests a day.
+
+    Prescription safety verification works without it — openFDA serves
+    unauthenticated traffic — so this is a throughput setting, not a feature
+    switch. When the limit is hit the label lookup fails like any other outage
+    and the affected drugs are reported as *unchecked*, never as safe.
+    """
+
+    PHARMACY_PROVIDER: str = "local_db"
+    """
+    Which pharmacy network answers stock, price and ordering.
+
+    `local_db` is the MedBridge-owned network and the only provider that can
+    answer truthfully today. Third-party adapters (Apollo, Tata 1mg, PharmEasy,
+    Netmeds, ONDC) register in `app/pharmacy/factory.py` and are selected here;
+    an unrecognised value falls back to `local_db` with a warning rather than
+    taking the feature offline.
+    """
+
+    PHARMACY_SEARCH_RADIUS_KM: float = 10.0
+    """How far to look for a dispensing partner before giving up."""
+
+    RXSAFETY_ENABLED: bool = True
+    """
+    Master switch for AI prescription verification.
+
+    Off means prescriptions are still issued, stored and dispensed exactly as
+    before; only the advisory safety review is skipped. Nothing in the
+    prescribing path depends on it.
     """
 
     PUBLIC_BASE_URL: str = ""

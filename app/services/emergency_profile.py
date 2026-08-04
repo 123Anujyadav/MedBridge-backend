@@ -27,7 +27,9 @@ from app.schemas.emergency_profile import (
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_MAPS_TEMPLATE = "https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+OSM_MAPS_TEMPLATE = (
+    "https://www.openstreetmap.org/?mlat={lat}&mlon={lng}#map=17/{lat}/{lng}"
+)
 """
 The documented Maps URL form, not a hand-rolled one.
 
@@ -40,7 +42,7 @@ trying to reach a patient.
 
 def build_maps_url(latitude: float, longitude: float) -> str:
     """The Google Maps link for a coordinate pair."""
-    return GOOGLE_MAPS_TEMPLATE.format(lat=latitude, lng=longitude)
+    return OSM_MAPS_TEMPLATE.format(lat=latitude, lng=longitude)
 
 
 def format_address(profile: EmergencyProfile) -> str:

@@ -43,7 +43,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
-            "img-src 'self' data: https://fastapi.tiangolo.com; "
+            # Map tiles are fetched by Leaflet straight from OpenStreetMap.
+            # Without this host the map renders as an empty grey grid. Marker
+            # icons are inline SVG data URIs, already covered by `data:`.
+            "img-src 'self' data: https://fastapi.tiangolo.com "
+            "https://*.tile.openstreetmap.org; "
             "connect-src 'self' ws: wss:;"
         )
                 

@@ -1,5 +1,6 @@
 import uuid
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import EntityNotFoundException, AuthorizationException
@@ -89,7 +90,16 @@ class ConsultationService:
                 "The prescription patient does not match the patient on this case."
             )
 
-        # Create Prescription record
+        # Create Prescription record.
+        #
+        # The prescriber's details are snapshotted rather than read live through
+        # the `doctor` relationship. A prescription is the legal record of who
+        # ordered what on whose authority; if these were resolved at read time,
+        # a clinician moving hospital or renewing a licence would silently
+        # rewrite every prescription they had ever signed.
+        qualification = ", ".join(
+            str(entry) for entry in (doctor.education or []) if entry
+        )
         rx = Prescription(
             case_id=case.id,
             patient_id=case.patient_id,
@@ -100,7 +110,15 @@ class ConsultationService:
             notes=req.notes,
             status="active",
             follow_up_date=req.follow_up_date,
-            attachment_url=req.attachment_url
+            attachment_url=req.attachment_url,
+            doctor_specialty=doctor.specialty,
+            doctor_qualification=qualification[:255] or None,
+            doctor_hospital=doctor.hospital_name,
+            doctor_registration_number=doctor.license_number,
+            doctor_experience_years=doctor.years_of_experience,
+            doctor_avatar_url=doctor.avatar_url,
+            consultation_date=datetime.now(timezone.utc),
+            signed_at=datetime.now(timezone.utc),
         )
         db.add(rx)
         await db.flush()  # Populate rx.id
@@ -122,9 +140,17 @@ class ConsultationService:
                 prescription_id=rx.id,
                 name=item.name,
                 generic_name=item.generic_name,
+                brand_name=item.brand_name,
+                strength=item.strength,
                 dosage=item.dosage,
                 frequency=item.frequency,
                 duration=item.duration,
+                food_instruction=item.food_instruction,
+                route=item.route,
+                # Falls back to the computed dose count so a pharmacy always has
+                # a number to dispense against, even when the clinician did not
+                # state one explicitly.
+                quantity=item.quantity if item.quantity is not None else total_doses,
                 special_instructions=item.special_instructions,
                 status="active",
                 scheduled_times=item.scheduled_times,

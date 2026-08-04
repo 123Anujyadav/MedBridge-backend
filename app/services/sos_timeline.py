@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.communication import CommunicationLog
 from app.models.emergency import EmergencyRequest, EmergencyStatusEvent
 from app.services.emergency_comms import mask_phone
-from app.services.google_maps import get_google_maps_service
+from app.services.maps import get_maps_service
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ class SOSTimelineService:
             return {"available": False, "reason": "Emergency not found."}
 
         if emergency.hospital_name:
-            maps = get_google_maps_service()
+            maps = get_maps_service()
             location = emergency.location or {}
             directions_url = None
             if (
@@ -179,7 +179,7 @@ class SOSTimelineService:
                 "directions_url": directions_url,
             }
 
-        if not get_google_maps_service().is_enabled():
+        if not get_maps_service().is_enabled():
             return {
                 "available": False,
                 "reason": (

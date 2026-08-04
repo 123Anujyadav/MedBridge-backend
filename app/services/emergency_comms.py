@@ -41,7 +41,7 @@ from app.models.emergency import EmergencyRequest
 from app.models.patient import Patient
 from app.models.user import User
 from app.services import emergency_templates as templates
-from app.services.google_maps import get_google_maps_service
+from app.services.maps import get_maps_service
 from app.services.twilio_gateway import DeliveryResult, get_twilio_gateway
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ class EmergencyCommsService:
         registered address and the plain map link, which is the honest state
         rather than a placeholder.
         """
-        maps = get_google_maps_service()
+        maps = get_maps_service()
         if not maps.is_enabled():
             return False
 

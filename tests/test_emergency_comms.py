@@ -32,7 +32,7 @@ from app.models.patient import Patient
 from app.models.user import User
 from app.services import emergency_templates as templates
 from app.services.emergency_comms import emergency_comms_service, mask_phone
-from app.services.google_maps import GoogleMapsService, set_google_maps_service
+from app.services.maps import MapsService, set_maps_service
 from app.services.sos_notifications import (
     NullEmergencyNotifier, set_emergency_notifier,
 )
@@ -82,7 +82,7 @@ class FakeGateway:
         return self.result
 
 
-class FakeMaps(GoogleMapsService):
+class FakeMaps(MapsService):
     """Maps with a key, answering fixed data."""
 
     def __init__(self, hospital=None, address="12 Real Street, Patna"):
@@ -106,10 +106,10 @@ def isolated_transports():
     set_emergency_notifier(NullEmergencyNotifier())
     gateway = FakeGateway()
     set_twilio_gateway(gateway)
-    set_google_maps_service(GoogleMapsService())  # no key by default
+    set_maps_service(MapsService())  # no key by default
     yield gateway
     set_twilio_gateway(None)
-    set_google_maps_service(None)
+    set_maps_service(None)
 
 
 @pytest.fixture
@@ -447,7 +447,7 @@ class TestMapsDeferredActivation:
         """
         The activation contract: the only change is configuration.
         """
-        set_google_maps_service(FakeMaps(hospital={
+        set_maps_service(FakeMaps(hospital={
             "name": "Patna Medical College Hospital",
             "latitude": 25.6100, "longitude": 85.1400,
             "distance_km": 2.4, "duration_minutes": 7,
@@ -468,7 +468,7 @@ class TestMapsDeferredActivation:
         self, client, estate, db
     ):
         """A known facility with an unknown ETA beats a guessed one."""
-        set_google_maps_service(FakeMaps(hospital={
+        set_maps_service(FakeMaps(hospital={
             "name": "Some Hospital", "latitude": 25.61, "longitude": 85.14,
         }))
         headers = await auth(client, PATIENT_A)
@@ -484,22 +484,56 @@ class TestMapsDeferredActivation:
         Not captured at import — that is what makes activation a restart
         rather than a deployment.
         """
-        service = GoogleMapsService()
-        monkeypatch.setattr(settings, "GOOGLE_MAPS_API_KEY", "")
+        service = MapsService()
+        monkeypatch.setattr(settings, "ORS_API_KEY", "")
         assert service.is_enabled() is False
-        monkeypatch.setattr(settings, "GOOGLE_MAPS_API_KEY", "AIza-something")
+        monkeypatch.setattr(settings, "ORS_API_KEY", "ors-something")
         assert service.is_enabled() is True
 
     def test_map_links_never_need_a_key(self, monkeypatch):
-        service = GoogleMapsService()
-        monkeypatch.setattr(settings, "GOOGLE_MAPS_API_KEY", "")
+        service = MapsService()
+        monkeypatch.setattr(settings, "ORS_API_KEY", "")
         url = service.build_maps_url(*PATNA)
         assert "25.5941" in url and "85.1376" in url
 
-    async def test_lookups_return_empty_rather_than_raising(self, monkeypatch):
-        service = GoogleMapsService()
-        monkeypatch.setattr(settings, "GOOGLE_MAPS_API_KEY", "")
+    async def test_routing_lookups_return_none_without_a_key(self, monkeypatch):
+        """
+        The ORS-backed lookups degrade to None, never an exception.
+
+        Geocoding and hospital search are deliberately excluded: they run
+        keyless through Nominatim and Overpass, so they keep working when
+        routing is unconfigured. That is a change from the Google
+        implementation, where an unset key meant no address at all.
+        """
+        service = MapsService()
+        monkeypatch.setattr(settings, "ORS_API_KEY", "")
+        assert await service.distance_matrix(PATNA, PATNA) is None
+        assert await service.route_geometry(PATNA, PATNA) is None
+
+    async def test_every_lookup_survives_an_upstream_outage(self, monkeypatch):
+        """
+        With every upstream unreachable, nothing raises and nothing is invented.
+
+        Stubbed rather than left to hit the live network: an emergency test that
+        depends on Nominatim being up is neither fast nor trustworthy.
+        """
+        service = MapsService()
+        monkeypatch.setattr(settings, "ORS_API_KEY", "ors-something")
+
+        async def dead_ors(*_args, **_kwargs):
+            return None
+
+        async def dead_osm(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(service, "_ors_post", dead_ors)
+        monkeypatch.setattr(service, "_osm_get", dead_osm)
+        monkeypatch.setattr(
+            "app.services.maps.OVERPASS_URL", "http://127.0.0.1:9/unreachable"
+        )
+
         assert await service.reverse_geocode(*PATNA) is None
+        assert await service.forward_geocode("anywhere") == []
         assert await service.find_nearby_hospitals(*PATNA) == []
         assert await service.distance_matrix(PATNA, PATNA) is None
         assert await service.nearest_hospital_with_eta(*PATNA) is None
@@ -520,7 +554,7 @@ class TestTemplates:
         assert "Comms Patient" in body
         assert str(emergency.id)[:8] in body
         assert "25.59" in body
-        assert "google.com/maps" in body
+        assert "openstreetmap.org" in body
 
     async def test_unknown_fields_are_omitted_not_filled_in(
         self, client, estate, db
@@ -555,7 +589,7 @@ class TestTemplates:
         emergency = await emergency_of(db, estate[PATIENT_A])
 
         body = templates.whatsapp_body(templates.build_context(emergency))
-        assert "google.com/maps" in body
+        assert "openstreetmap.org" in body
         assert "MEDBRIDGE EMERGENCY SOS" in body
 
 
@@ -649,7 +683,7 @@ class TestSecrets:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1] / "app"
-        for module in ("services/twilio_gateway.py", "services/google_maps.py",
+        for module in ("services/twilio_gateway.py", "services/maps.py",
                        "services/emergency_comms.py"):
             source = (root / module).read_text(encoding="utf-8")
 
@@ -670,8 +704,8 @@ class TestSecrets:
         assert "settings.TWILIO_AUTH_TOKEN" in gateway
 
         maps = (Path(__file__).resolve().parents[1] / "app" / "services"
-                / "google_maps.py").read_text(encoding="utf-8")
-        assert "settings.GOOGLE_MAPS_API_KEY" in maps
+                / "maps.py").read_text(encoding="utf-8")
+        assert "settings.ORS_API_KEY" in maps
 
     def test_no_phone_number_is_hardcoded(self):
         from pathlib import Path

@@ -1,6 +1,6 @@
 import uuid
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 from app.schemas.clinical_review import ConfidenceReading
 from app.schemas.patient_api import AppointmentResponse, ReportResponse
@@ -22,6 +22,16 @@ class CreateMedicationItem(BaseModel):
     dosage: str = Field(min_length=1, max_length=100)
     frequency: str = Field(min_length=1, max_length=100)
     duration: str = Field(min_length=1, max_length=100)
+    # Dispensing detail. All optional so every existing client keeps working
+    # unchanged — a prescription written without them is still valid, it simply
+    # carries less information downstream to the pharmacy.
+    brand_name: Optional[str] = Field(None, max_length=150)
+    strength: Optional[str] = Field(None, max_length=100)
+    food_instruction: Optional[
+        Literal["before_food", "after_food", "with_food", "empty_stomach", "anytime"]
+    ] = None
+    route: Optional[str] = Field(None, max_length=50)
+    quantity: Optional[int] = Field(None, ge=1, le=1000)
     special_instructions: str = Field(default="")
     scheduled_times: List[str] = Field(default_factory=list)
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")

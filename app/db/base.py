@@ -7,6 +7,26 @@ from app.models.doctor import Doctor  # noqa
 from app.models.hospital import Hospital  # noqa
 from app.models.case import Case, Symptom  # noqa
 from app.models.prescription import Prescription, Medication  # noqa
+from app.models.rx_verification import (  # noqa
+    PrescriptionVerification,
+    VerificationFinding,
+)
+from app.models.pharmacy import (  # noqa
+    Pharmacy,
+    PharmacyInventory,
+    PharmacyDocument,
+    PharmacyVerificationEvent,
+)
+from app.models.delivery import (  # noqa
+    DeliveryPartner,
+    DeliveryAssignment,
+    DeliveryEvent,
+)
+from app.models.medicine_order import (  # noqa
+    MedicineOrder,
+    MedicineOrderItem,
+    OrderStatusEvent,
+)
 from app.models.appointment import Appointment  # noqa
 from app.models.report import Report  # noqa
 from app.models.report_version import ReportVersion  # noqa

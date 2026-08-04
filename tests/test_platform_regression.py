@@ -159,6 +159,13 @@ class TestSerializationRegressions:
             "/api/v1/shared/reports/{id}/download",
             "/api/v1/doctor/analytics/export",
             "/api/v1/doctor/reports/bulk/export",
+            # Streams the rendered prescription PDF, not a serialised row.
+            "/api/v1/prescriptions/{prescription_id}/pdf",
+            # Streams inventory as CSV, not a serialised row.
+            "/api/v1/admin/pharmacies/{pharmacy_id}/inventory/export",
+            # Pharmacy Owner Portal CSV downloads.
+            "/api/v1/pharmacy-portal/inventory/export",
+            "/api/v1/pharmacy-portal/reports/sales",
             "/api/v1/shared/notifications/unread-count",
             "/api/v1/shared/notifications/read-all",
             "/api/v1/shared/notifications/read-selected",

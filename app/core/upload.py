@@ -22,6 +22,17 @@ the download route looked in `Backend/app/uploads`, so every generated PDF
 
 REPORTS_DIR = os.path.join(UPLOADS_ROOT, "reports")
 
+PRESCRIPTIONS_DIR = os.path.join(UPLOADS_ROOT, "prescriptions")
+"""
+Rendered prescription PDFs.
+
+Kept apart from `reports` deliberately: the two are different clinical
+documents with different retention and access rules, and the existing report
+download route resolves filenames inside REPORTS_DIR. Sharing one directory
+would let a prescription id collide with a report id and serve the wrong
+document to the wrong reader.
+"""
+
 # Security thresholds
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB limit
 ALLOWED_MIME_TYPES: Set[str] = {

@@ -350,7 +350,7 @@ class TestLocation:
         assert body["latitude"] == pytest.approx(25.5941)
         assert body["longitude"] == pytest.approx(85.1376)
         assert body["maps_url"] == build_maps_url(25.5941, 85.1376)
-        assert "google.com/maps" in body["maps_url"]
+        assert "openstreetmap.org" in body["maps_url"]
         assert body["location_updated_at"] is not None
 
     async def test_maps_url_cannot_be_supplied_by_the_client(self, client, estate):
@@ -597,8 +597,10 @@ class TestRateLimitScope:
 class TestHelpers:
     def test_maps_url_points_at_the_given_coordinates(self):
         url = build_maps_url(25.5941, 85.1376)
-        assert url.startswith("https://www.google.com/maps")
-        assert "25.5941,85.1376" in url
+        assert url.startswith("https://www.openstreetmap.org")
+        # OpenStreetMap takes the marker as separate params, not a comma pair.
+        assert "mlat=25.5941" in url
+        assert "mlon=85.1376" in url
 
     def test_formatted_address_skips_missing_parts(self):
         profile = EmergencyProfile(

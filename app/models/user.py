@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, CheckConstraint, String
+import uuid
+
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base_class import Base
 
@@ -8,7 +10,12 @@ class User(Base):
     """
     __tablename__ = "users"  # Explicitly override base table naming
     __table_args__ = (
-        CheckConstraint("role IN ('patient', 'doctor', 'admin')", name="user_role_check"),
+        # `pharmacy` joins the existing roles rather than starting a second
+        # identity system: the same login, the same token, the same RoleChecker.
+        CheckConstraint(
+            "role IN ('patient', 'doctor', 'admin', 'pharmacy', 'delivery_partner')",
+            name="user_role_check",
+        ),
     )
 
 
@@ -45,6 +52,23 @@ class User(Base):
         default="patient",
         nullable=False
     )
+
+    pharmacy_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("pharmacies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    """
+    The store this account operates, for `role='pharmacy'` accounts.
+
+    Null for every other role, and the reason the portal needs no store id in
+    any request: the pharmacy an owner may act on is read from their own user
+    row, so there is no path parameter to tamper with to reach someone else's
+    inventory or orders.
+
+    SET NULL rather than CASCADE — retiring a pharmacy must not delete the
+    person who ran it, since their audit trail references that account.
+    """
     
     is_active: Mapped[bool] = mapped_column(
         Boolean,

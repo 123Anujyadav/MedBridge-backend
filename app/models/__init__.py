@@ -5,6 +5,19 @@ from app.models.doctor import Doctor
 from app.models.hospital import Hospital
 from app.models.case import Case, Symptom
 from app.models.prescription import Prescription, Medication
+from app.models.rx_verification import PrescriptionVerification, VerificationFinding
+from app.models.pharmacy import (
+    Pharmacy,
+    PharmacyInventory,
+    PharmacyDocument,
+    PharmacyVerificationEvent,
+)
+from app.models.delivery import (
+    DeliveryPartner,
+    DeliveryAssignment,
+    DeliveryEvent,
+)
+from app.models.medicine_order import MedicineOrder, MedicineOrderItem, OrderStatusEvent
 from app.models.appointment import Appointment
 from app.models.report import Report
 from app.models.notification import NotificationItem
@@ -23,6 +36,18 @@ __all__ = [
     "Symptom",
     "Prescription",
     "Medication",
+    "PrescriptionVerification",
+    "VerificationFinding",
+    "Pharmacy",
+    "PharmacyInventory",
+    "PharmacyDocument",
+    "PharmacyVerificationEvent",
+    "MedicineOrder",
+    "MedicineOrderItem",
+    "OrderStatusEvent",
+    "DeliveryPartner",
+    "DeliveryAssignment",
+    "DeliveryEvent",
     "Appointment",
     "Report",
     "NotificationItem",
