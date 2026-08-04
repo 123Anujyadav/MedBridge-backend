@@ -1,4 +1,6 @@
 import uuid
+from datetime import date as _date, timedelta
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,7 +35,11 @@ async def test_appointment_service_flow(db: AsyncSession):
         doctor_id=d_user.id,
         specialty="Cardiology",
         hospital_name="Aronofy General Hospital",
-        date="2026-08-01",
+        # Relative, not hardcoded. A fixed date silently becomes a past date
+        # once it passes, and the booking validator then rejects it — this
+        # test failed permanently from 2026-08-02 onward for that reason,
+        # which would keep any CI gate red forever.
+        date=(_date.today() + timedelta(days=30)).isoformat(),
         time="10:00",
         type="video",
         reason="Routine Checkup"
