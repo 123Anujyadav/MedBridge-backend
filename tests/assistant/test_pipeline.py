@@ -20,6 +20,7 @@ from app.assistant.domain.enums import (
 )
 from app.assistant.domain.language import detect_language
 from app.assistant.infrastructure.guardrails import LLMGuardrails
+from app.assistant.pipeline import prompts as prompts_module
 from app.assistant.pipeline.graph import LangGraphAssistantPipeline
 from app.intake.domain.enums import Language
 from tests.assistant.conftest import (
@@ -211,6 +212,138 @@ class TestEmergency:
         )
         _, answer = await _ask(scripted_llm, "crushing chest pain for an hour")
         assert answer.urgency.level is UrgencyLevel.EMERGENCY
+
+    @pytest.mark.parametrize(
+        "text,marker",
+        [
+            ("I have crushing chest pain", "Do not drive yourself"),
+            ("mujhe seene me dard hai", "Khud gaadi na chalayein"),
+            ("मुझे सीने में दर्द है", "स्वयं गाड़ी न चलाएँ"),
+        ],
+    )
+    async def test_red_flag_reply_carries_first_aid_in_the_patients_language(
+        self, dead_llm, text, marker
+    ):
+        """First aid on this path is deterministic: no model, still guidance."""
+        _, answer = await _ask(dead_llm, text)
+        assert any(marker in action for action in answer.actions)
+
+    async def test_emergency_card_names_no_hospital_it_cannot_know(
+        self, scripted_llm
+    ):
+        """
+        A guessed facility is a fabrication.
+
+        The card's location strip falls back to a hard-coded sample hospital
+        when the backend sends nothing, so this field must always be populated
+        with something true.
+        """
+        _, answer = await _ask(scripted_llm, "I have crushing chest pain")
+        hint = answer.emergency.nearest_hospital
+        assert hint and "Emergency" in hint
+
+
+class TestModelGradedEmergency:
+    """
+    The safety net for emergencies the deterministic scan does not match.
+
+    Sepsis signs, a thunderclap headache and similar presentations have no
+    red-flag pattern; before this the model could grade a turn `Emergency` and
+    the patient would still see no emergency guidance.
+    """
+
+    THUNDERCLAP = "the worst headache of my life started an hour ago"
+
+    def _emergency_payload(self, **overrides):
+        return answer_payload(
+            urgency={"level": "Emergency", "explanation": "Sudden severe onset."},
+            **overrides,
+        )
+
+    async def test_no_red_flag_fires_on_this_text(self, scripted_llm):
+        """Guards the premise: this text reaches the model path, not the node."""
+        _, answer = await _ask(scripted_llm, self.THUNDERCLAP)
+        assert answer.red_flags == []
+
+    async def test_model_graded_emergency_renders_the_card(self, scripted_llm):
+        scripted_llm.responses["answer"] = self._emergency_payload(
+            emergency={
+                "heading": "Get emergency care now",
+                "description": "Call your local emergency number and do not drive.",
+            }
+        )
+        _, answer = await _ask(scripted_llm, self.THUNDERCLAP)
+
+        assert answer.emergency is not None
+        assert answer.emergency.heading == "Get emergency care now"
+        assert answer.emergency_risk is EmergencyRisk.CRITICAL
+        assert "emergency" in answer.to_ui_payload()
+
+    async def test_missing_notice_falls_back_to_deterministic_guidance(
+        self, scripted_llm
+    ):
+        """An Emergency grading without a notice must still guide the patient."""
+        scripted_llm.responses["answer"] = self._emergency_payload()
+        _, answer = await _ask(scripted_llm, self.THUNDERCLAP)
+
+        assert answer.emergency is not None
+        assert "emergency" in answer.emergency.description.casefold()
+
+    async def test_malformed_notice_falls_back(self, scripted_llm):
+        scripted_llm.responses["answer"] = self._emergency_payload(
+            emergency={"heading": "   ", "description": None}
+        )
+        _, answer = await _ask(scripted_llm, self.THUNDERCLAP)
+        assert answer.emergency.heading
+        assert answer.emergency.description
+
+    @pytest.mark.parametrize("level", ["Low", "Medium", "High"])
+    async def test_routine_urgency_never_renders_the_card(self, scripted_llm, level):
+        """
+        The card is a critical full-width alert and reports risk CRITICAL.
+
+        A model that volunteers the key on a sore throat must not be able to
+        alarm the patient.
+        """
+        scripted_llm.responses["answer"] = answer_payload(
+            urgency={"level": level, "explanation": "routine"},
+            emergency={"heading": "Panic", "description": "Call an ambulance."},
+        )
+        _, answer = await _ask(scripted_llm, "I have a mild sore throat")
+
+        assert answer.emergency is None
+        assert "emergency" not in answer.to_ui_payload()
+        assert answer.emergency_risk is not EmergencyRisk.CRITICAL
+
+
+class TestSelfCareGuidance:
+    """Section 1: immediate self-care rides the existing `actions` card."""
+
+    async def test_prompt_asks_for_immediate_self_care(self, scripted_llm):
+        await _ask(scripted_llm, "I have a headache")
+        prompt = [p for p in scripted_llm.prompts if "ALREADY ASKED" in p][-1]
+
+        assert "IMMEDIATE SELF-CARE" in prompt
+        assert "non-prescription" in prompt
+        assert "never suggest starting or\nstopping a prescription medicine" in prompt
+
+    async def test_prompt_scopes_the_emergency_key(self, scripted_llm):
+        prompt_source = prompts_module.ANSWER_SYSTEM_PROMPT
+
+        assert "EMERGENCY ACTIONS" in prompt_source
+        assert "Do not describe invasive or advanced medical interventions" in (
+            prompt_source
+        )
+        # Certainty and follow-up discipline are part of the same contract.
+        assert "Never claim certainty" in prompt_source
+        assert "pregnancy status" in prompt_source
+
+    async def test_self_care_actions_reach_the_ui_payload(self, scripted_llm):
+        scripted_llm.responses["answer"] = answer_payload(
+            actions=["Sit down and rest", "Sip water slowly", "Avoid driving today"]
+        )
+        _, answer = await _ask(scripted_llm, "I feel dizzy when I stand up")
+        assert answer.to_ui_payload()["actions"][0] == "Sit down and rest"
 
 
 # ----------------------------------------------------------- Safety

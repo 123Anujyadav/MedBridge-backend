@@ -64,6 +64,70 @@ _EMERGENCY_GUIDANCE = {
     ),
 }
 
+_EMERGENCY_HEADING = {
+    "english": "Seek emergency care now",
+    "hindi": "तुरंत आपातकालीन चिकित्सा सहायता लें",
+    "hinglish": "Turant emergency medical help lein",
+}
+
+_EMERGENCY_ACTIONS: dict[str, list[str]] = {
+    # General, non-invasive steps only. Nothing here asks an untrained patient
+    # to perform a procedure, and nothing here can be wrong enough to harm:
+    # the worst case is that help was already on its way.
+    "english": [
+        "Call your local emergency number now, or ask someone with you to call.",
+        "Do not drive yourself — let someone else take you, or wait for the "
+        "ambulance.",
+        "Stay with another adult until help arrives, if anyone is nearby.",
+        "Sit or lie down somewhere safe and try to stay still and calm.",
+        "If someone becomes unresponsive, turn them on their side so the airway "
+        "stays clear, and loosen tight clothing.",
+        "If a doctor has already prescribed you emergency medication for a known "
+        "condition, use it exactly as they instructed.",
+        "Do not delay care while waiting for a reply here.",
+    ],
+    "hindi": [
+        "अभी अपने स्थानीय आपातकालीन नंबर पर कॉल करें, या पास मौजूद किसी व्यक्ति से "
+        "कॉल करने को कहें।",
+        "स्वयं गाड़ी न चलाएँ — किसी और को ले जाने दें या एम्बुलेंस की प्रतीक्षा करें।",
+        "यदि कोई पास हो, तो मदद आने तक किसी वयस्क के साथ रहें।",
+        "किसी सुरक्षित जगह पर बैठ या लेट जाएँ और शांत रहने का प्रयास करें।",
+        "यदि व्यक्ति बेहोश हो जाए, तो उसे करवट पर लिटाएँ ताकि साँस का रास्ता खुला "
+        "रहे, और तंग कपड़े ढीले कर दें।",
+        "यदि डॉक्टर ने किसी ज्ञात बीमारी के लिए पहले से आपातकालीन दवा दी है, तो "
+        "उसे उनके निर्देशानुसार ही लें।",
+        "यहाँ उत्तर की प्रतीक्षा में इलाज में देरी न करें।",
+    ],
+    "hinglish": [
+        "Abhi apne local emergency number par call karein, ya paas mojood kisi "
+        "vyakti se call karne ko kahein.",
+        "Khud gaadi na chalayein — kisi aur ko le jaane dein ya ambulance ka "
+        "intezaar karein.",
+        "Agar koi paas ho, to madad aane tak kisi adult ke saath rahein.",
+        "Kisi surakshit jagah par baith ya let jaayein aur shaant rehne ki "
+        "koshish karein.",
+        "Agar vyakti behosh ho jaaye, to unhe karvat par litayein taaki saans ka "
+        "raasta khula rahe, aur tight kapde dheele kar dein.",
+        "Agar doctor ne kisi known condition ke liye pehle se emergency dawa di "
+        "hai, to use unke bataye tareeke se hi lein.",
+        "Yahaan reply ka intezaar karke ilaaj mein deri na karein.",
+    ],
+}
+
+_HOSPITAL_HINT = {
+    # Shown in the card's location strip. Deliberately points at the platform's
+    # own emergency page instead of naming a facility: this layer knows nothing
+    # about where the patient is, and a guessed hospital name is a fabrication.
+    "english": "Open Emergency for verified nearby hospitals and one-tap SOS",
+    "hindi": "नज़दीकी सत्यापित अस्पतालों और SOS के लिए Emergency पेज खोलें",
+    "hinglish": "Nazdeeki verified hospitals aur SOS ke liye Emergency page kholein",
+}
+
+
+def _localised(table: dict[str, Any], language: str):
+    """Pick the patient's language, falling back to English."""
+    return table.get(language, table["english"])
+
 
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -342,13 +406,15 @@ class AssistantNodes:
 
         No retrieval, no follow-up questions: a patient describing crushing
         chest pain is told to seek care, not asked to rate their symptoms.
+
+        The steps in `actions` are fixed rather than generated: this path exists
+        precisely for when the model cannot be trusted or reached, so its
+        first-aid guidance must not depend on one.
         """
         conversation = state["conversation"]
         flags = state.get("red_flags") or []
         language = conversation.language.value
-        guidance = _EMERGENCY_GUIDANCE.get(
-            language, _EMERGENCY_GUIDANCE["english"]
-        )
+        guidance = _localised(_EMERGENCY_GUIDANCE, language)
 
         answer = AssistantAnswer(
             reply_text=guidance,
@@ -356,13 +422,15 @@ class AssistantNodes:
             symptoms=[e.value for e in state.get("entities", [])] or list(
                 conversation.known_symptoms
             ),
+            actions=list(_localised(_EMERGENCY_ACTIONS, language)),
             urgency=UrgencyAssessment(
                 level=UrgencyLevel.EMERGENCY,
                 explanation="Automated screening matched: " + "; ".join(flags),
             ),
             emergency=EmergencyNotice(
-                heading="Seek emergency care now",
+                heading=_localised(_EMERGENCY_HEADING, language),
                 description=guidance,
+                nearest_hospital=_localised(_HOSPITAL_HINT, language),
             ),
             specialist=SpecialistSuggestion(
                 name="Emergency Medicine",
@@ -468,6 +536,35 @@ class AssistantNodes:
         if flags and urgency_level.rank < UrgencyLevel.EMERGENCY.rank:
             urgency_level = UrgencyLevel.EMERGENCY
 
+        # Emergency card on the model path — the safety net for presentations
+        # the deterministic red-flag scan does not match (anaphylaxis after a
+        # sting, sepsis signs, "worst headache of my life"). Gated on the final
+        # urgency, never on the model merely volunteering the key: this card is
+        # a critical full-width alert and reports risk CRITICAL upstream, so it
+        # must not fire on routine symptoms. Emergency actions themselves are
+        # never left to the model alone — a missing or empty description falls
+        # back to the same deterministic guidance the red-flag path uses.
+        emergency = None
+        if urgency_level is UrgencyLevel.EMERGENCY:
+            language = conversation.language.value
+            raw_emergency = payload.get("emergency")
+            heading = description = ""
+            if isinstance(raw_emergency, dict):
+                heading = str(raw_emergency.get("heading", "")).strip()
+                description = str(raw_emergency.get("description", "")).strip()
+            emergency = EmergencyNotice(
+                heading=heading or _localised(_EMERGENCY_HEADING, language),
+                description=description or _localised(_EMERGENCY_GUIDANCE, language),
+                nearest_hospital=_localised(_HOSPITAL_HINT, language),
+            )
+            logger.warning(
+                "[ASSISTANT_MODEL_EMERGENCY] conversation=%s red_flags=%s "
+                "model_supplied_notice=%s",
+                conversation.conversation_id,
+                flags or "none",
+                isinstance(raw_emergency, dict),
+            )
+
         # Suppress questions already asked in earlier turns.
         follow_ups = [
             q
@@ -503,7 +600,7 @@ class AssistantNodes:
             medicines=medicines,
             specialist=specialist,
             urgency=UrgencyAssessment(level=urgency_level, explanation=explanation),
-            emergency=None,
+            emergency=emergency,
             references=references[:6],
             follow_up_questions=follow_ups,
             conversation_title=str(payload.get("conversationTitle", "")).strip()
